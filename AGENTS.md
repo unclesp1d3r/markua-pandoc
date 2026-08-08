@@ -10,6 +10,7 @@ Read it before making structural changes.
 Solutions to problems already solved here live in [`docs/solutions/`](docs/solutions/),
 organized by category with YAML frontmatter (`module`, `tags`, `problem_type`) —
 relevant when implementing or debugging in a documented area.
+Shared domain vocabulary lives in [`CONCEPTS.md`](CONCEPTS.md).
 
 ## Architecture
 
