@@ -1,0 +1,48 @@
+# Pre-commit hooks configuration for mag_stacker
+# See https://pre-commit.com for more information
+#
+# Install: pip install pre-commit
+# Then run: pre-commit install
+# Update hooks: pre-commit autoupdate
+
+repos:
+    # General file quality checks (well-maintained by pre-commit team)
+    - repo: https://github.com/pre-commit/pre-commit-hooks
+      rev: v6.0.0
+      hooks:
+          - id: trailing-whitespace
+            exclude: ^(node_modules/|dist/|coverage/|\.git/|package-lock\.json)
+            types: [text]
+          - id: end-of-file-fixer
+            exclude: ^(node_modules/|dist/|coverage/|\.git/|\.hook)
+            types: [text]
+          - id: check-yaml
+            args: [--unsafe] # Allow custom tags in YAML
+            types: [yaml]
+          - id: check-json
+            types: [json]
+          - id: check-added-large-files
+            args: [--maxkb=1000] # Warn on files > 1MB
+          - id: check-merge-conflict
+          - id: detect-private-key
+            types: [text]
+          - id: check-vcs-permalinks
+          - id: check-case-conflict
+          - id: check-illegal-windows-names
+          - id: check-shebang-scripts-are-executable
+            types: [shell, python]
+          - id: check-symlinks
+
+    - repo: local
+      hooks:
+          - id: shellcheck
+            name: ShellCheck
+            entry: mise x -- shellcheck
+            language: system
+            types: [shell]
+
+    - repo: https://github.com/rhysd/actionlint
+      rev: v1.7.12
+      hooks:
+          - id: actionlint
+            files: "\\.github/workflows/"
