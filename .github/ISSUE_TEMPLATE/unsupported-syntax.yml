@@ -1,0 +1,46 @@
+name: Unsupported Markua construct
+description: A valid Markua construct this reader does not handle yet.
+labels: ["enhancement", "markua-coverage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when the reader errors out on syntax that Leanpub itself accepts.
+        Quizzes and exercises are **deliberately** out of scope for v1 and are
+        rejected on purpose — please do not file those.
+
+  - type: textarea
+    id: construct
+    attributes:
+      label: The construct
+      render: markdown
+    validations:
+      required: true
+
+  - type: input
+    id: spec
+    attributes:
+      label: Where it is documented
+      description: Section of the Markua spec, or a link to a Leanpub book using it.
+    validations:
+      required: false
+
+  - type: textarea
+    id: expected-output
+    attributes:
+      label: What it should become
+      description: >
+        Ideally the pandoc AST or pandoc-markdown equivalent. If you are not sure,
+        describe the intent and we will work it out.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I confirmed Leanpub itself accepts this syntax.
+          required: false
+        - label: This is not a quiz or exercise (out of scope for v1).
+          required: true

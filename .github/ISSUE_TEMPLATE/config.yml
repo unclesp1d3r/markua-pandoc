@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Markua specification
+    url: https://leanpub.com/markua/read
+    about: The official Markua spec. Worth checking before reporting a syntax bug.
+  - name: Design record
+    url: https://github.com/unclesp1d3r/markua-pandoc/blob/main/docs/plan.md
+    about: Architecture, task breakdown, and the explicit out-of-scope list.
