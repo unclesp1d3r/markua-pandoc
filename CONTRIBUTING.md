@@ -15,12 +15,14 @@ drifting apart.
 
 ```sh
 mise install     # the pinned toolchain
-just setup       # the above, plus busted
+just setup       # the above, plus the luarocks packages
 ```
 
-`busted` is the one exception: it is a luarocks package rather than a mise tool,
-so `just setup` fetches it after `mise install`. The lua plugin bundles luarocks,
-so it is already on your path. Add the rock binaries to yours:
+`busted` and `luacheck` are the exceptions: both are luarocks packages rather
+than mise tools, so `just setup` fetches them after `mise install`. They are
+declared once in `markua-pandoc-dev-1.rockspec`, which `just install` reads. The
+lua plugin bundles luarocks, so it is already on your path. Add the rock
+binaries to yours:
 
 ```sh
 export PATH="$HOME/.luarocks/bin:$PATH"

@@ -68,8 +68,9 @@ resolves.
   it. pandoc embeds Lua 5.4, so that is the interpreter that actually executes the
   reader in production.
 - **Lua 5.4** — the target runtime. The mise lua plugin bundles luarocks.
-- **busted** — unit tests. A luarocks package rather than a mise tool, so
-  `just install` fetches it.
+- **busted** — unit tests. **luacheck** — Lua linting, enforced by `just lint`
+  and CI. Both are luarocks packages rather than mise tools, so they are declared
+  in `markua-pandoc-dev-1.rockspec` and `just install` fetches them.
 
 ## Workflow
 
