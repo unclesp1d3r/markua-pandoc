@@ -8,7 +8,6 @@ pandoc              = "latest"
 shellcheck          = "latest"
 "pipx:pre-commit"   = "latest"
 lua-language-server = "3.18.2"
-luajit              = "2.1.1744318430"
 
 # Many of these settings are defaults, but we are explicit in case they change in the future and to make it clear to users what is enabled.
 [settings]
