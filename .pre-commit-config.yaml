@@ -46,3 +46,12 @@ repos:
       hooks:
           - id: actionlint
             files: "\\.github/workflows/"
+
+    # markdownlint-cli2 rather than markdownlint-cli: the latter is deprecated
+    # upstream. Config is auto-discovered from .markdownlint.json, so there is
+    # no second config file to keep in sync.
+    - repo: https://github.com/DavidAnson/markdownlint-cli2
+      rev: v0.23.2
+      hooks:
+          - id: markdownlint-cli2
+            types: [markdown]
