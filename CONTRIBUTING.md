@@ -124,7 +124,8 @@ certifying you have the right to submit the work under the project's license.
 ## Pull requests
 
 - Branch off `main`.
-- CI must be green. It runs the full suite on Lua 5.4 and 5.5.
+- CI must be green. It runs the full suite on Lua 5.4, the version pandoc
+  embeds and therefore the one that actually executes the reader.
 - New syntax support needs both a unit test and a golden case.
 - Note anything you deliberately left out of scope.
 
