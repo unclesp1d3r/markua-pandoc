@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The custom reader API and GitHub-alert parsing both require pandoc 3.10+.
+  PANDOC_VERSION: "3.10.1"
+
+jobs:
+  test:
+    name: test (lua ${{ matrix.lua-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 5.4 is the target runtime. 5.5 runs too, so regressions surface early.
+        lua-version: ["5.4", "5.5"]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Lua ${{ matrix.lua-version }}
+        uses: leafo/gh-actions-lua@v13
+        with:
+          luaVersion: ${{ matrix.lua-version }}
+
+      - name: Set up LuaRocks
+        uses: leafo/gh-actions-luarocks@v6
+
+      - name: Install busted
+        run: luarocks install busted
+
+      - name: Install pandoc ${{ env.PANDOC_VERSION }}
+        run: |
+          curl -fsSL -o /tmp/pandoc.deb \
+            "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-amd64.deb"
+          sudo dpkg -i /tmp/pandoc.deb
+          pandoc --version | head -1
+
+      # The test suite arrives with Task 1 of docs/plan.md. Until the Makefile
+      # exists there is nothing to run, and a loud notice beats a silent pass.
+      - name: Detect project skeleton
+        id: skeleton
+        run: |
+          if [ -f Makefile ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Skeleton not present::No Makefile yet; see docs/plan.md Task 1. Test steps skipped."
+          fi
+
+      - name: Unit tests (busted)
+        if: steps.skeleton.outputs.present == 'true'
+        run: make unit
+
+      - name: Golden-file tests
+        if: steps.skeleton.outputs.present == 'true'
+        run: make golden
+
+      - name: Filter integration tests
+        if: steps.skeleton.outputs.present == 'true'
+        run: make filters
+
+      - name: CLI tests
+        if: steps.skeleton.outputs.present == 'true'
+        run: make cli
