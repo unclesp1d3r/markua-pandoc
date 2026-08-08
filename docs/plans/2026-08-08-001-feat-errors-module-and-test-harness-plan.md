@@ -107,7 +107,7 @@ Strict is the default in three of the four shapes, matching the posture
 ### Risks
 
 - CI calls `luarocks path --lr-bin` without `--local` while installing with `--local`. Confirmed working end-to-end on a clean runner: the install resolved busted from the rockspec and `busted test/` then ran and passed. The PATH line is unchanged and must stay that way -- `--lr-bin` is colon-joined while `$GITHUB_PATH` takes one entry per line.
-- `just lint` does not run luacheck. `.pre-commit-config.yaml` has no luacheck hook — luacheck runs on pull requests via CodeRabbit (`.luacheckrc:5`, `.coderabbit.yml`). Treat `just lint` as a formatting and workflow gate, and run luacheck directly to check the Lua.
+- luacheck is a pre-commit hook, so `just lint` and every commit enforce it, and CI runs the same gate. Because luacheck is a luarocks package rather than a mise tool it is not already on PATH, so the hook resolves it through `luarocks path --lr-bin`. It matches `.lua` files and `.busted`; luacheck ignores `.rockspec` by extension.
 
 ---
 
@@ -220,12 +220,12 @@ Strict is the default in three of the four shapes, matching the posture
 | --- | --- | --- | --- |
 | Unit specs (red) | `busted test/errors_spec.lua` | U1 | Non-zero exit naming `module 'src.markua.errors' not found` |
 | Unit specs (green) | `just unit` | U2, U3 | 8 successes, 0 failures |
-| Lua lint | `luacheck src/markua/errors.lua test/errors_spec.lua` | U2 | Zero warnings. Run directly — `just lint` does not include luacheck |
-| Repo hooks | `just lint` | U3 | actionlint, check-yaml, markdownlint, whitespace and EOF hooks all pass |
+| Lua lint | `just lint` (or `luacheck src test` directly) | U2, U3 | Zero warnings. luacheck is a pre-commit hook, so this also runs on commit and in CI |
+| Repo hooks | `just lint` | U3 | luacheck, actionlint, check-yaml, markdownlint, whitespace and EOF hooks all pass |
 | Dependency install | `just install` | U3 | Exit 0 |
 | Recipe list | `just` | U3 | Recipes listed; none call a missing script |
 
-`busted` and `luacheck` live at `~/.luarocks/bin` and need `export PATH="$HOME/.luarocks/bin:$PATH"`. Lua itself comes from mise (5.4.8).
+`busted` and `luacheck` are both declared in the rockspec and land in `~/.luarocks/bin`; `just setup` installs them and `export PATH="$HOME/.luarocks/bin:$PATH"` puts them on PATH for direct invocation. Lua itself comes from mise (5.4.8).
 
 ---
 

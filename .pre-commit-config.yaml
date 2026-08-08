@@ -41,6 +41,18 @@ repos:
             language: system
             types: [shell]
 
+          # luacheck is a luarocks package rather than a mise tool, so unlike
+          # shellcheck it is not already on PATH. luarocks -- which mise does
+          # provide -- knows where its own bin tree lives. Matches .lua plus
+          # .busted; luacheck ignores .rockspec files by extension.
+          - id: luacheck
+            name: luacheck
+            entry:
+                bash -c 'export PATH="$(mise x -- luarocks path --lr-bin):$PATH"; exec
+                luacheck "$@"' --
+            language: system
+            files: '(\.lua$|^\.busted$)'
+
     - repo: https://github.com/rhysd/actionlint
       rev: v1.7.12
       hooks:

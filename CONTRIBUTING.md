@@ -49,7 +49,14 @@ tool missing a Linux entry fails the build.
 just           # list every available recipe
 just test      # everything currently wired up
 just unit      # busted specs only — fast, run these constantly
+just lint      # every pre-commit hook across all files
 ```
+
+`just lint` is the same gate CI runs. It includes **luacheck**, so Lua problems
+surface locally rather than waiting for review. luacheck is a luarocks package
+rather than a mise tool, so `just setup` installs it from the rockspec alongside
+busted; the hook finds it through `luarocks path --lr-bin` even when
+`~/.luarocks/bin` is not on your PATH.
 
 Recipes arrive with the scripts they run, so `just --list` is the authoritative
 answer to what exists today. `golden`, `filters` and `cli` are added by Tasks 9,

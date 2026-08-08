@@ -57,6 +57,12 @@ jobs:
           just install
           luarocks path --lr-bin | tr ':' '\n' >> "$GITHUB_PATH"
 
+      # luacheck ships in the rockspec alongside busted, so it is on PATH by here.
+      # pre-commit also owns actionlint and markdownlint, so one step is the whole
+      # lint gate rather than three. Previously nothing enforced these in CI.
+      - name: Lint (pre-commit)
+        run: just lint
+
       # The suite arrives incrementally, so a phase runs only once it exists.
       # Presence is decided by whether the JUSTFILE defines the recipe, not by
       # a path duplicated here: the justfile names the script, so renaming
