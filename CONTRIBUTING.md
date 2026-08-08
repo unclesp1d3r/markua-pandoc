@@ -86,7 +86,7 @@ fix the module. Do not special-case a document inside `src/markua.lua`.
 
 [Conventional Commits](https://www.conventionalcommits.org/), with a DCO sign-off:
 
-```
+```text
 feat: fence-aware line scanner
 fix: do not split attribute values on commas inside quotes
 test: golden case for hierarchical index entries
