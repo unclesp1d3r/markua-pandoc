@@ -78,10 +78,13 @@ gap that `mise-action`'s `--locked` install mode cannot tolerate.
 ## Solution
 
 **Fix 1 — stop double-provisioning tools `mise.toml` already owns (commit
-`fddfa2b`).** `.github/workflows/ci.yml` dropped `leafo/gh-actions-luarocks`,
-`extractions/setup-just`, the hand-rolled pandoc `.deb` install, and the
+`fddfa2b`, "fix(ci): let mise own the toolchain").** `.github/workflows/ci.yml`
+dropped `leafo/gh-actions-luarocks`, `extractions/setup-just`, and the
 `PANDOC_VERSION` env var, replacing them with one step that verifies every
-tool mise provisioned and asserts the pandoc floor:
+tool mise provisioned and asserts the pandoc floor. (The hand-rolled pandoc
+`.deb` install had already come out of the workflow two commits earlier, in
+`a191961`, "ci: add CodeRabbit and luacheck configuration", which dropped it
+alongside the Lua 5.4/5.5 matrix — so `fddfa2b` itself did not remove it.)
 
 ```yaml
 # .github/workflows/ci.yml:39-50 (current)
@@ -173,8 +176,10 @@ parallel with `mise.toml`/`mise.lock`:
   opaque busted or golden-file failure with no indication the toolchain
   itself was the culprit.
 - Dropping `luajit` removes a tool the project does not actually use for
-  anything load-bearing. Per `AGENTS.md:62-65`, pandoc embeds PUC Lua 5.4,
-  and that is the interpreter that executes the reader in production; busted
+  anything load-bearing. Per `AGENTS.md:62-65`, pandoc embeds Lua 5.4, and
+  that is the interpreter that executes the reader in production (the
+  `ec76d6c` commit message is where the sharper "PUC Lua 5.4" phrasing comes
+  from); busted
   also runs under Lua 5.4 per the `test (lua 5.4)` job name
   (`.github/workflows/ci.yml:19`). LuaJIT is Lua 5.1-compatible — running
   specs under it would disagree with production Lua 5.4 on integer division,
