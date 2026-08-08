@@ -3,9 +3,15 @@ redactions = [ "*_SECRET", "*_KEY", "*_PASSWORD" ]
 # Many tools are set to "latest" to take advantage of idiomatic version files, which will automatically update the tool to the latest version when the version file is updated. This allows us to keep our tools up to date without having to manually update the version in this configuration file.
 [tools]
 just              = "latest"
+# The lua plugin bundles luarocks, so this covers both. busted is a luarocks
+# package rather than a mise tool: `luarocks install --local busted`.
+# CI exercises 5.4 and 5.5 via a matrix, which mise.toml cannot express.
+lua               = "5.4.8"
 pandoc            = "3.10.1"
 shellcheck        = "latest"
 "pipx:pre-commit" = "latest"
+lua-language-server = "3.18.2"
+luajit = "2.1.1744318430"
 
 # Many of these settings are defaults, but we are explicit in case they change in the future and to make it clear to users what is enabled.
 [settings]

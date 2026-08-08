@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # Later steps run repository-controlled commands (make, test/*.sh).
+          # Later steps run repository-controlled commands (just, test/*.sh).
           # Do not leave a usable token in the git config for them.
           persist-credentials: false
 
@@ -46,16 +46,22 @@ jobs:
       - name: Install busted
         run: luarocks install busted
 
+      # The recipes are run with just, which ubuntu-latest does not ship.
+      - name: Set up just
+        uses: extractions/setup-just@v4
+
       - name: Install pandoc ${{ env.PANDOC_VERSION }}
         run: |
+          arch=$(dpkg --print-architecture)
           curl -fsSL -o /tmp/pandoc.deb \
-            "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-amd64.deb"
+            "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-${arch}.deb"
           sudo dpkg -i /tmp/pandoc.deb
           pandoc --version | head -1
+          just --version
 
-      # The suite arrives incrementally: Makefile in Task 1, test/golden.sh in
+      # The suite arrives incrementally: justfile in Task 1, test/golden.sh in
       # Task 9, test/filters.sh in Task 10, test/cli.sh in Task 12. Gate each
-      # phase on its own assets, so an intermediate PR is not failed by a target
+      # phase on its own assets, so an intermediate PR is not failed by a recipe
       # whose script does not exist yet, and say out loud what was skipped.
       - name: Detect available test assets
         id: assets
@@ -68,23 +74,23 @@ jobs:
               echo "::notice title=Phase unavailable::$2 not present; the '$1' phase was skipped. See docs/plan.md."
             fi
           }
-          detect unit    Makefile
+          detect unit    justfile
           detect golden  test/golden.sh
           detect filters test/filters.sh
           detect cli     test/cli.sh
 
       - name: Unit tests (busted)
         if: steps.assets.outputs.unit == 'true'
-        run: make unit
+        run: just unit
 
       - name: Golden-file tests
         if: steps.assets.outputs.unit == 'true' && steps.assets.outputs.golden == 'true'
-        run: make golden
+        run: just golden
 
       - name: Filter integration tests
         if: steps.assets.outputs.unit == 'true' && steps.assets.outputs.filters == 'true'
-        run: make filters
+        run: just filters
 
       - name: CLI tests
         if: steps.assets.outputs.unit == 'true' && steps.assets.outputs.cli == 'true'
-        run: make cli
+        run: just cli

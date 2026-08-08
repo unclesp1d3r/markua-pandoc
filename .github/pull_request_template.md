@@ -9,7 +9,7 @@ Closes #
 <!-- Which specs, which golden cases. If you ran the whole-book smoke test, say
      against what manuscript and what the before/after failure counts were. -->
 
-- [ ] `make test` passes locally
+- [ ] `just test` passes locally
 
 ## Checklist
 

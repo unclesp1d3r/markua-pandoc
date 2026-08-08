@@ -24,10 +24,10 @@
 
 ## File Structure
 
-```
+```text
 markua-pandoc/
 ├── README.md
-├── Makefile                        # test, lint, install targets
+├── justfile                        # test, lint, install recipes
 ├── markua-pandoc-dev-1.rockspec    # busted dependency for `luarocks test`
 ├── bin/
 │   └── markua                      # POSIX sh wrapper around pandoc
@@ -65,11 +65,14 @@ markua-pandoc/
 ### Task 1: Repo skeleton and test harness
 
 **Files:**
-- Create: `Makefile`, `README.md`, `markua-pandoc-dev-1.rockspec`, `.gitignore`
+
+- Create: `justfile`, `markua-pandoc-dev-1.rockspec`
+- (`README.md` and `.gitignore` already exist; Task 13 owns writing the README)
 - Create: `src/markua/errors.lua`
 - Test: `test/errors_spec.lua`
 
 **Interfaces:**
+
 - Consumes: nothing
 - Produces: `errors.new(file, line, message) -> table` with fields `file`, `line`, `message` and a `__tostring` metamethod rendering `file:line: message`; `errors.raise(file, line, message)` which calls `error()` with that table.
 
@@ -150,23 +153,26 @@ return M
 Run: `busted test/errors_spec.lua`
 Expected: PASS, 2 successes
 
-- [ ] **Step 7: Add the Makefile**
+- [ ] **Step 7: Add the justfile**
 
-Create `Makefile`:
+Create `justfile`. Define only the recipes whose scripts exist — `golden`,
+`filters` and `cli` are added by Tasks 9, 10 and 12 as their scripts land, so
+that `just test` never invokes a script that is not there yet.
 
-```make
-.PHONY: test unit golden clean
+```just
+# Running `just` with no arguments lists the available recipes.
+default:
+    @just --list
 
-test: unit golden
+# Everything CI runs.
+test: unit
 
+# busted unit specs. Fast; run these constantly.
 unit:
-	busted test/
-
-golden:
-	./test/golden.sh
+    busted test/
 
 clean:
-	rm -rf build
+    rm -rf build
 ```
 
 - [ ] **Step 8: Commit**
@@ -181,10 +187,12 @@ git commit -m "feat: error type with source position and test harness"
 ### Task 2: Fence-aware line scanner
 
 **Files:**
+
 - Create: `src/markua/scanner.lua`
 - Test: `test/scanner_spec.lua`
 
 **Interfaces:**
+
 - Consumes: `errors` from Task 1
 - Produces: `scanner.scan(text) -> array of line records`. Each record is `{ text = string, number = integer, in_code = boolean, fence = "open"|"close"|nil, info = string|nil }`. `in_code` is true for lines *inside* a fence and for the fence delimiters themselves. `info` carries the fence info string (e.g. `python`, `$`) on the opening fence record.
 
@@ -306,10 +314,12 @@ git commit -m "feat: fence-aware line scanner"
 ### Task 3: Attribute-list parser
 
 **Files:**
+
 - Create: `src/markua/attributes.lua`
 - Test: `test/attributes_spec.lua`
 
 **Interfaces:**
+
 - Consumes: `errors` from Task 1
 - Produces:
   - `attributes.is_attribute_line(text) -> boolean` — true when the trimmed line is exactly `{...}`.
@@ -491,10 +501,12 @@ git commit -m "feat: Markua attribute-list parser"
 ### Task 4: Config and class validation
 
 **Files:**
+
 - Create: `src/markua/config.lua`
 - Test: `test/config_spec.lua`
 
 **Interfaces:**
+
 - Consumes: nothing
 - Produces: `config.defaults() -> table` with `callout_classes` (array), `strict` (boolean), `index_keys` (array). `config.merge(base, overrides) -> table`. `config.is_callout_class(cfg, name) -> boolean`.
 
@@ -598,10 +610,12 @@ git commit -m "feat: reader config with overridable callout classes"
 ### Task 5: Blurbs, asides, and matter directives
 
 **Files:**
+
 - Create: `src/markua/blocks.lua`
 - Test: `test/blocks_spec.lua`
 
 **Interfaces:**
+
 - Consumes: `scanner`, `attributes`, `config`, `errors`
 - Produces: `blocks.transform(lines, cfg, file) -> array of strings`. Input is scanner records; output is pandoc-markdown lines. Blurbs and asides become fenced divs (`::: {.tip .blurb}` … `:::`), matter directives become fenced divs (`::: {.frontmatter}` … `:::` is *not* used; they emit `::: {.matter matter="front"}` self-closing markers), `{class: part}` attaches to the following heading.
 
@@ -804,10 +818,12 @@ git commit -m "feat: blurbs, asides, matter directives, part headings"
 ### Task 6: Index entries, superscript, subscript, inline math
 
 **Files:**
+
 - Create: `src/markua/inline.lua`
 - Test: `test/inline_spec.lua`
 
 **Interfaces:**
+
 - Consumes: `config`
 - Produces: `inline.transform(text, cfg) -> string`. Rewrites index markers to bracketed spans, `^x^` to pandoc superscript, `~x~` to subscript, and backtick-dollar inline math to `$...$`. Operates on a single line of prose and is only ever called on lines where `in_code` is false.
 
@@ -914,10 +930,12 @@ git commit -m "feat: index markers and inline math"
 ### Task 7: Resource dispatch by extension
 
 **Files:**
+
 - Create: `src/markua/resources.lua`
 - Test: `test/resources_spec.lua`
 
 **Interfaces:**
+
 - Consumes: `attributes`, `errors`
 - Produces:
   - `resources.kind(path) -> "image"|"video"|"audio"|"code"|"table"|"math"|"unknown"` from the file extension.
@@ -1109,10 +1127,12 @@ git commit -m "feat: resource dispatch by extension with crop aliases"
 ### Task 8: Display math fences and quiz rejection
 
 **Files:**
+
 - Modify: `src/markua/blocks.lua` (add math-fence and quiz handling to `M.transform`)
 - Modify: `test/blocks_spec.lua`
 
 **Interfaces:**
+
 - Consumes: unchanged
 - Produces: `blocks.transform` additionally converts a fence whose info string is `$` into `$$` delimiters, and raises a `MarkuaError` on a `{quiz...}` or `{exercise...}` attribute line.
 
@@ -1206,12 +1226,14 @@ git commit -m "feat: display math fences; reject quizzes and exercises"
 ### Task 9: The Reader entry point
 
 **Files:**
+
 - Create: `src/markua.lua`
 - Create: `test/golden.sh`
 - Create: `test/golden/blurb-tip.md`, `test/golden/blurb-tip.native`
 - Create: `test/golden/index-entries.md`, `test/golden/index-entries.native`
 
 **Interfaces:**
+
 - Consumes: `scanner`, `blocks`, `inline`, `resources`, `config`
 - Produces: a global `Reader(inputs, opts)` returning a `pandoc.Pandoc`. This is the only file permitted to reference the `pandoc` global.
 
@@ -1348,15 +1370,27 @@ UPDATE=1 ./test/golden.sh
 grep -c 'index' test/golden/index-entries.native   # expect 2
 ```
 
-- [ ] **Step 6: Run the full suite**
+- [ ] **Step 6: Add the golden recipe**
 
-Run: `make test`
+In `justfile`, add the recipe and wire it into `test`:
+
+```just
+test: unit golden
+
+# pandoc AST comparison. Regenerate with: UPDATE=1 ./test/golden.sh
+golden:
+    ./test/golden.sh
+```
+
+- [ ] **Step 7: Run the full suite**
+
+Run: `just test`
 Expected: all busted specs pass, all golden files match
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/markua.lua test/golden.sh test/golden/
+git add src/markua.lua test/golden.sh test/golden/ justfile
 git commit -m "feat: pandoc custom reader entry point with golden tests"
 ```
 
@@ -1365,10 +1399,12 @@ git commit -m "feat: pandoc custom reader entry point with golden tests"
 ### Task 10: Index-to-Word-XE filter
 
 **Files:**
+
 - Create: `src/filters/index-xe.lua`
 - Create: `test/filters.sh`
 
 **Interfaces:**
+
 - Consumes: spans with class `index` and attribute `entry`, produced by `inline.transform`
 - Produces: a `Span` filter emitting `RawInline("openxml", ...)` Word field codes. No-ops for non-DOCX output because `RawInline` with an `openxml` format is ignored by other writers.
 
@@ -1439,23 +1475,22 @@ end
 Run: `./test/filters.sh`
 Expected: `ok   index-xe produced 2 Word index fields`
 
-- [ ] **Step 5: Wire it into the Makefile**
+- [ ] **Step 5: Wire it into the justfile**
 
-In `Makefile`, change the `test` target:
+In `justfile`, add the recipe and extend `test`:
 
-```make
+```just
 test: unit golden filters
 
+# Builds real DOCX files and asserts on their XML.
 filters:
-	./test/filters.sh
+    ./test/filters.sh
 ```
-
-and add `filters` to `.PHONY`.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/filters/index-xe.lua test/filters.sh Makefile
+git add src/filters/index-xe.lua test/filters.sh justfile
 git commit -m "feat: lower index spans to Word XE index fields"
 ```
 
@@ -1464,10 +1499,12 @@ git commit -m "feat: lower index spans to Word XE index fields"
 ### Task 11: Callout-to-Word-style filter
 
 **Files:**
+
 - Create: `src/filters/callouts.lua`
 - Modify: `test/filters.sh`
 
 **Interfaces:**
+
 - Consumes: divs with a callout class plus `.blurb`, or class `.aside`, produced by `blocks.transform`
 - Produces: a `Div` filter setting `custom-style`, which pandoc's docx writer maps to a named Word paragraph style.
 
@@ -1550,10 +1587,12 @@ git commit -m "feat: map callouts to named Word paragraph styles"
 ### Task 12: The `markua` CLI wrapper
 
 **Files:**
+
 - Create: `bin/markua`
 - Create: `test/cli.sh`
 
 **Interfaces:**
+
 - Consumes: `src/markua.lua`, both filters
 - Produces: `markua <input.md> -o <output.ext> [pandoc args...]` — resolves the reader and filter paths relative to the script, applies both filters by default, and passes everything else through to pandoc.
 
@@ -1618,17 +1657,20 @@ chmod +x bin/markua
 Run: `./test/cli.sh`
 Expected: `ok   cli builds docx and html`
 
-- [ ] **Step 5: Add it to the Makefile and commit**
+- [ ] **Step 5: Add it to the justfile and commit**
 
-In `Makefile`, add `cli` to the `test` target and `.PHONY`, with:
+In `justfile`, add the recipe and extend `test`:
 
-```make
+```just
+test: unit golden filters cli
+
+# Exercises bin/markua end to end.
 cli:
-	./test/cli.sh
+    ./test/cli.sh
 ```
 
 ```bash
-git add bin/markua test/cli.sh Makefile
+git add bin/markua test/cli.sh justfile
 git commit -m "feat: markua CLI wrapper"
 ```
 
@@ -1639,10 +1681,12 @@ git commit -m "feat: markua CLI wrapper"
 ### Task 13: Whole-book smoke test
 
 **Files:**
+
 - Create: `test/book.sh`
 - Create: `README.md` (usage section)
 
 **Interfaces:**
+
 - Consumes: everything
 - Produces: a script that converts every file of a real Markua manuscript and asserts no errors, plus counts of preserved constructs.
 
@@ -1702,7 +1746,7 @@ Expected: `failed: 0`, and a non-zero index-field count
 
 - [ ] **Step 5: Run the whole suite**
 
-Run: `make test`
+Run: `just test`
 Expected: all green
 
 - [ ] **Step 6: Write the README**

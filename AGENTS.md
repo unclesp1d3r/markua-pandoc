@@ -63,9 +63,10 @@ Test-driven, per `docs/plan.md`: write the failing test, watch it fail, implemen
 minimum, watch it pass, commit.
 
 ```sh
-make test      # unit + golden + filters + cli
-make unit      # busted only
-make golden    # pandoc AST golden files; regenerate with UPDATE=1 ./test/golden.sh
+just           # list the available recipes
+just test      # unit + golden + filters + cli
+just unit      # busted only
+just golden    # pandoc AST golden files; regenerate with UPDATE=1 ./test/golden.sh
 ```
 
 Golden files generated from broken code lock in the bug — **read them before committing.**

@@ -46,11 +46,12 @@ pandoc --version | head -1 | awk '{split($2, v, "."); if (v[1] < 3 || (v[1] == 3
 ## Running the tests
 
 ```sh
-make test      # everything: unit + golden + filters + cli
-make unit      # busted specs only — fast, run these constantly
-make golden    # pandoc AST comparison against test/golden/*.native
-make filters   # builds real DOCX files and asserts on their XML
-make cli       # exercises bin/markua end to end
+just           # list every available recipe
+just test      # everything: unit + golden + filters + cli
+just unit      # busted specs only — fast, run these constantly
+just golden    # pandoc AST comparison against test/golden/*.native
+just filters   # builds real DOCX files and asserts on their XML
+just cli       # exercises bin/markua end to end
 ```
 
 To regenerate golden files after an intentional change:
