@@ -7,6 +7,10 @@ entries and resource attributes that a markdown-to-markdown pipeline cannot carr
 The authoritative design and task breakdown lives in [`docs/plan.md`](docs/plan.md).
 Read it before making structural changes.
 
+Solutions to problems already solved here live in [`docs/solutions/`](docs/solutions/),
+organized by category with YAML frontmatter (`module`, `tags`, `problem_type`) —
+relevant when implementing or debugging in a documented area.
+
 ## Architecture
 
 A **delegating reader**. Markua-only syntax is rewritten in pure Lua into
@@ -81,5 +85,4 @@ just golden    # pandoc AST golden files; regenerate with UPDATE=1 ./test/golden
 Golden files generated from broken code lock in the bug — **read them before committing.**
 
 When the whole-book smoke test (`./test/book.sh <manuscript>`) surfaces an unhandled
-construct, add a focused unit test to the module that owns it and fix the module. Do not
-special-case a document in `src/markua.lua`.
+construct, add a focused unit test to the module that owns it and fix the module. Do not special-case a document in `src/markua.lua`.
