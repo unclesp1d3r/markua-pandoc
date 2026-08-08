@@ -17,10 +17,13 @@ brew install pandoc lua luarocks          # macOS
 ```
 
 ```sh
-# Debian/Ubuntu: apt's pandoc is too old, take the upstream .deb
+# Debian/Ubuntu: apt's pandoc is too old, take the upstream .deb.
+# Upstream publishes amd64 and arm64; dpkg rejects a package built for the
+# wrong architecture, so ask dpkg which one this machine is.
 PANDOC_VERSION=3.10.1
+ARCH=$(dpkg --print-architecture)
 curl -fsSL -o /tmp/pandoc.deb \
-  "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-amd64.deb"
+  "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-${ARCH}.deb"
 sudo dpkg -i /tmp/pandoc.deb
 sudo apt install lua5.4 luarocks
 ```
