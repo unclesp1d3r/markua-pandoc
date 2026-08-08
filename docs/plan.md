@@ -179,6 +179,11 @@ unit:
 install:
     luarocks install --local busted
 
+# Full setup from a clean checkout: mise owns the toolchain, luarocks owns busted.
+setup:
+    mise install
+    @just install
+
 # Every pre-commit hook, across all files rather than just the staged ones.
 lint:
     pre-commit run --all-files

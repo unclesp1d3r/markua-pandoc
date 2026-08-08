@@ -8,40 +8,40 @@ for the full design record and task breakdown.
 
 ## Setup
 
-**pandoc 3.10 or newer is required** — the custom reader API depends on it. Debian
-and Ubuntu package repositories ship older versions, so install from upstream there
-rather than from `apt`.
+[mise](https://mise.jdx.dev) is the single source of truth for the toolchain.
+`mise.toml` pins lua, pandoc, just and shellcheck, and `mise.lock` pins the exact
+artifacts, so a local machine and CI resolve the same versions rather than
+drifting apart.
 
 ```sh
-brew install pandoc lua luarocks          # macOS
+mise install     # the pinned toolchain
+just setup       # the above, plus busted
 ```
 
-```sh
-# Debian/Ubuntu: apt's pandoc is too old, take the upstream .deb.
-# Upstream publishes amd64 and arm64; dpkg rejects a package built for the
-# wrong architecture, so ask dpkg which one this machine is.
-PANDOC_VERSION=3.10.1
-ARCH=$(dpkg --print-architecture)
-curl -fsSL -o /tmp/pandoc.deb \
-  "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-${ARCH}.deb"
-sudo dpkg -i /tmp/pandoc.deb
-sudo apt install lua5.4 luarocks
-```
+`busted` is the one exception: it is a luarocks package rather than a mise tool,
+so `just setup` fetches it after `mise install`. The lua plugin bundles luarocks,
+so it is already on your path. Add the rock binaries to yours:
 
 ```sh
-luarocks install --local busted
 export PATH="$HOME/.luarocks/bin:$PATH"
 ```
 
-Verify the toolchain, and fail loudly if pandoc is too old:
+Confirm the toolchain resolves — CI runs this same check and fails on a pandoc
+older than 3.10, which the custom reader API requires:
 
 ```sh
+lua -v
+luarocks --version | head -1
+just --version
 busted --version
-
-pandoc --version | head -1
 pandoc --version | head -1 | awk '{split($2, v, "."); if (v[1] < 3 || (v[1] == 3 && v[2] < 10))
   { print "pandoc " $2 " is too old; 3.10+ required"; exit 1 } else print "pandoc " $2 " ok" }'
 ```
+
+Change tool versions with `mise use <tool>@<version>` rather than editing
+`mise.toml` by hand, so the lockfile stays in step. After changing one, run
+`mise lock --platform linux-x64` as well: CI installs in `--locked` mode and a
+tool missing a Linux entry fails the build.
 
 ## Running the tests
 

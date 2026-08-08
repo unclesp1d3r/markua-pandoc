@@ -53,9 +53,18 @@ manuscripts.
 
 ## Toolchain
 
-- **pandoc 3.10+** — the custom reader API and GitHub-alert parsing both depend on it.
-- **Lua 5.4** — the target runtime.
-- **busted** — unit tests, via `luarocks install --local busted`.
+[mise](https://mise.jdx.dev) is the single source of truth. `mise.toml` pins the
+versions and `mise.lock` pins the artifacts, so local and CI resolve identically.
+Change a version with `mise use <tool>@<version>`, never by editing `mise.toml`
+directly, then `mise lock --platform linux-x64` so CI's `--locked` install still
+resolves.
+
+- **pandoc 3.10+** — the custom reader API and GitHub-alert parsing both depend on
+  it. pandoc embeds Lua 5.4, so that is the interpreter that actually executes the
+  reader in production.
+- **Lua 5.4** — the target runtime. The mise lua plugin bundles luarocks.
+- **busted** — unit tests. A luarocks package rather than a mise tool, so
+  `just install` fetches it.
 
 ## Workflow
 
