@@ -47,11 +47,19 @@ tool missing a Linux entry fails the build.
 
 ```sh
 just           # list every available recipe
-just test      # everything: unit + golden + filters + cli
+just test      # everything currently wired up
 just unit      # busted specs only — fast, run these constantly
-just golden    # pandoc AST comparison against test/golden/*.native
-just filters   # builds real DOCX files and asserts on their XML
-just cli       # exercises bin/markua end to end
+```
+
+Recipes arrive with the scripts they run, so `just --list` is the authoritative
+answer to what exists today. `golden`, `filters` and `cli` are added by Tasks 9,
+10 and 12 of [`docs/plan.md`](docs/plan.md), and `just test` grows to include
+each one as it lands:
+
+```sh
+just golden    # pandoc AST comparison against test/golden/*.native (Task 9)
+just filters   # builds real DOCX files and asserts on their XML  (Task 10)
+just cli       # exercises bin/markua end to end                  (Task 12)
 ```
 
 To regenerate golden files after an intentional change:

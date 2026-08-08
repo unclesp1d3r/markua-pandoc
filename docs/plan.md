@@ -78,10 +78,13 @@ markua-pandoc/
 
 - [ ] **Step 1: Create the repo skeleton**
 
+The repository, `.gitignore` and `justfile` already exist from bootstrap, so
+this is only the source tree. Do **not** recreate `.gitignore`: the committed
+one is considerably more than these five lines, and it carries a `!bin/`
+re-include that a wider global gitignore would otherwise defeat.
+
 ```bash
 mkdir -p src/markua src/filters bin test/golden
-printf '*.docx\n*.epub\nbuild/\n.luarocks/\nlua_modules/\n' > .gitignore
-git init && git add -A && git commit -m "chore: repo skeleton"
 ```
 
 - [ ] **Step 2: Install the Lua toolchain**
@@ -115,6 +118,18 @@ describe("errors", function()
     assert.equals("a.md", err.file)
     assert.equals("boom", err.message)
   end)
+
+  it("reports fatally when strict", function()
+    local ok = pcall(errors.report, { strict = true }, "a.md", 1, "boom")
+    assert.is_false(ok)
+  end)
+
+  it("downgrades to a warning when not strict", function()
+    -- Without this path cfg.strict is dead config and --lenient does nothing.
+    local ok, result = pcall(errors.report, { strict = false }, "a.md", 1, "boom")
+    assert.is_true(ok)
+    assert.is_false(result)
+  end)
 end)
 ```
 
@@ -145,13 +160,29 @@ function M.raise(file, line, message)
   error(M.new(file, line, message), 0)
 end
 
+--- Report without aborting. Used only when config.strict is false, so the
+--- documented --lenient flag downgrades hard errors instead of being inert.
+function M.warn(file, line, message)
+  io.stderr:write("warning: " .. tostring(M.new(file, line, message)) .. "\n")
+end
+
+--- Raise when strict, warn otherwise. Every unknown-construct path goes
+--- through here so leniency is one decision rather than scattered branches.
+function M.report(cfg, file, line, message)
+  if cfg and cfg.strict == false then
+    M.warn(file, line, message)
+    return false
+  end
+  M.raise(file, line, message)
+end
+
 return M
 ```
 
 - [ ] **Step 6: Run the tests and make sure they pass**
 
 Run: `busted test/errors_spec.lua`
-Expected: PASS, 2 successes
+Expected: PASS, 4 successes
 
 - [x] **Step 7: Add the justfile** — already in the repo
 
@@ -249,6 +280,27 @@ describe("scanner", function()
     assert.equals(1, lines[1].number)
     assert.equals(2, lines[2].number)
   end)
+
+  it("recognises a fence indented up to three spaces", function()
+    local lines = scanner.scan("text\n\n   ```json\n   {\"k\": 1}\n   ```\n")
+    assert.is_true(lines[3].in_code)
+    assert.equals("open", lines[3].fence)
+    assert.is_true(lines[4].in_code)
+  end)
+
+  it("treats a four-space indented block as code", function()
+    -- Without this, "    {timeout: 30}" reads as a Markua attribute list.
+    local lines = scanner.scan("Consider:\n\n    {timeout: 30}\n\nDone.\n")
+    assert.is_false(lines[1].in_code)
+    assert.is_true(lines[3].in_code)
+    assert.is_false(lines[5].in_code)
+  end)
+
+  it("does not treat an indented continuation line as code", function()
+    -- Four spaces only start a code block after a blank line.
+    local lines = scanner.scan("A paragraph\n    wrapped by hand.\n")
+    assert.is_false(lines[2].in_code)
+  end)
 end)
 ```
 
@@ -269,11 +321,23 @@ Create `src/markua/scanner.lua`:
 -- with '{', which a naive attribute-list match would corrupt.
 local M = {}
 
+-- How deep a line is indented, and the text with that indent removed.
+local function indent_of(line)
+  local spaces = line:match("^( *)")
+  return #spaces
+end
+
 -- Returns marker and info string if the line opens or closes a fence.
+-- CommonMark allows a fence to be indented up to three spaces; at four it is
+-- an indented code block instead, which is handled separately below.
 local function fence_parts(line)
-  local marker, info = line:match("^(```+)(.*)$")
+  if indent_of(line) > 3 then
+    return nil
+  end
+  local body = line:gsub("^ *", "")
+  local marker, info = body:match("^(```+)(.*)$")
   if not marker then
-    marker, info = line:match("^(~~~+)(.*)$")
+    marker, info = body:match("^(~~~+)(.*)$")
   end
   if not marker then
     return nil
@@ -281,28 +345,59 @@ local function fence_parts(line)
   return marker, (info or ""):match("^%s*(.-)%s*$")
 end
 
+local function is_blank(line)
+  return line:match("^%s*$") ~= nil
+end
+
 function M.scan(text)
   local lines = {}
   local open_marker = nil
+  local indented = false      -- inside a four-space indented code block
+  local prev_blank = true     -- start of document counts as a blank
   local number = 0
 
   for line in (text .. "\n"):gmatch("(.-)\n") do
     number = number + 1
+    local blank = is_blank(line)
     local marker, info = fence_parts(line)
     local record = { text = line, number = number, in_code = open_marker ~= nil }
 
-    if marker then
-      if not open_marker then
-        open_marker = marker
-        record.in_code = true
-        record.fence = "open"
-        record.info = info
-      elseif marker:sub(1, 1) == open_marker:sub(1, 1)
-             and #marker >= #open_marker and info == "" then
-        record.in_code = true
+    if open_marker then
+      -- Inside a fence: only a matching closing marker matters.
+      if marker and marker:sub(1, 1) == open_marker:sub(1, 1)
+         and #marker >= #open_marker and info == "" then
         record.fence = "close"
         open_marker = nil
       end
+    elseif marker then
+      open_marker = marker
+      indented = false
+      record.in_code = true
+      record.fence = "open"
+      record.info = info
+    else
+      -- An indented code block starts on a four-space indent after a blank
+      -- line, and runs until a non-blank line dedents. Without this, a code
+      -- sample such as "    {timeout: 30}" reads as a Markua attribute list
+      -- and gets rewritten -- the same corruption fences protect against.
+      if indented then
+        if blank then
+          record.in_code = true          -- blank lines do not end the block
+        elseif indent_of(line) >= 4 then
+          record.in_code = true
+        else
+          indented = false
+        end
+      elseif prev_blank and not blank and indent_of(line) >= 4 then
+        indented = true
+        record.in_code = true
+      end
+    end
+
+    if not blank then
+      prev_blank = false
+    else
+      prev_blank = true
     end
 
     lines[#lines + 1] = record
@@ -317,7 +412,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/scanner_spec.lua`
-Expected: PASS, 4 successes
+Expected: PASS, 7 successes
 
 - [ ] **Step 5: Commit**
 
@@ -684,6 +779,42 @@ describe("blocks.transform", function()
     assert.is_false(ok)
     assert.is_truthy(tostring(err):find("bogus", 1, true))
   end)
+
+  it("accepts a decorative class alongside the callout class", function()
+    local out = run("{.wide, class: tip}\nB> hi\n")
+    assert.is_truthy(out:find(".tip", 1, true))
+  end)
+
+  it("rejects an attribute list that precedes a plain paragraph", function()
+    -- The B> path already raises; this one used to leak "{.bogus}" into the
+    -- output as literal text, which is the corruption hard errors exist to stop.
+    local ok, err = pcall(run, "{class: bogus}\nJust a paragraph.\n")
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("bogus", 1, true))
+  end)
+
+  it("rejects an attribute list left unconsumed at end of input", function()
+    local ok = pcall(run, "Some intro text.\n\n{class: tip}")
+    assert.is_false(ok)
+  end)
+
+  it("rejects a second attribute list that would shadow the first", function()
+    local ok = pcall(run, '{title: "x"}\n{class: tip}\nB> hello\n')
+    assert.is_false(ok)
+  end)
+
+  it("passes a standalone index line through untouched", function()
+    -- inline.transform runs after this pass and owns index markers. Claiming
+    -- it here would render {ix="B-tree"} as visible text in the book.
+    local out = run('{ix: "B-tree"}\n\nB-trees are fast.\n')
+    assert.is_truthy(out:find('{ix: "B-tree"}', 1, true))
+  end)
+
+  it("never transforms B> or {/blurb} inside a code fence", function()
+    local out = run("```markua\nB> not a blurb\n{/blurb}\n```\n")
+    assert.is_truthy(out:find("B> not a blurb", 1, true))
+    assert.is_nil(out:find(":::", 1, true))
+  end)
 end)
 ```
 
@@ -712,24 +843,70 @@ local function strip_prefix(text, prefix)
 end
 
 -- Pull the callout class out of a pending attribute list, validating it.
+-- A list may legitimately carry decorative classes alongside the callout one
+-- ({.wide, class: tip}), so every class is considered before rejecting.
 local function callout_class(pending, cfg, file, line)
-  for _, c in ipairs(pending.classes) do
-    if not config.is_callout_class(cfg, c) then
-      errors.raise(file, line, "unknown callout class '" .. c .. "'")
-    end
-    return c
+  if #pending.classes == 0 then
+    return nil
   end
-  return nil
+  for _, c in ipairs(pending.classes) do
+    if config.is_callout_class(cfg, c) then
+      return c
+    end
+  end
+  errors.raise(file, line,
+    "unknown callout class '" .. table.concat(pending.classes, "', '") .. "'")
+end
+
+-- An attribute list holding only index keys belongs to inline.transform, which
+-- runs after this pass. Re-emit it untouched rather than treating it as a
+-- pending block attribute, or a standalone {ix: "term"} line would surface as
+-- literal text in the finished book.
+local function is_index_only(parsed, cfg)
+  if parsed.id or #parsed.classes > 0 or #parsed.bare > 0 then
+    return false
+  end
+  local count = 0
+  for key in pairs(parsed.keyvals) do
+    local known = false
+    for _, index_key in ipairs(cfg.index_keys) do
+      if key == index_key then
+        known = true
+      end
+    end
+    if not known then
+      return false
+    end
+    count = count + 1
+  end
+  return count > 0
 end
 
 function M.transform(lines, cfg, file)
   local out = {}
   local pending = nil        -- attribute list awaiting its element
   local pending_line = nil
+  local pending_text = nil   -- the raw line, for verbatim re-emission
   local i = 1
 
   local function emit(s)
     out[#out + 1] = s
+  end
+
+  -- Nothing may consume an attribute list and quietly forget it. Every exit
+  -- from the pending state goes through here, so an unclaimed list aborts with
+  -- its own line number instead of leaking braces into the book or vanishing.
+  local function reject_pending(reason)
+    if not pending then
+      return
+    end
+    local text = pending_text
+    errors.report(cfg, file, pending_line,
+      (reason or "attribute list applies to nothing") .. ": " .. text)
+    -- Only reached when cfg.strict is false. Re-emit verbatim: leniency should
+    -- preserve the author's text, never silently delete it.
+    emit(text)
+    pending, pending_line, pending_text = nil, nil, nil
   end
 
   while i <= #lines do
@@ -766,8 +943,13 @@ function M.transform(lines, cfg, file)
         end
         emit(":::")
         i = i + 1
+      elseif is_index_only(parsed, cfg) then
+        reject_pending()
+        emit(text)                     -- verbatim; inline.transform owns it
+        i = i + 1
       else
-        pending, pending_line = parsed, rec.number
+        reject_pending()               -- a new list may not shadow an unused one
+        pending, pending_line, pending_text = parsed, rec.number, text
         i = i + 1
       end
 
@@ -779,7 +961,7 @@ function M.transform(lines, cfg, file)
         i = i + 1
       end
       emit(":::")
-      pending = nil
+      pending, pending_line, pending_text = nil, nil, nil
 
     elseif text:match("^A>") then
       emit("::: {.aside}")
@@ -788,27 +970,27 @@ function M.transform(lines, cfg, file)
         i = i + 1
       end
       emit(":::")
-      pending = nil
+      pending, pending_line, pending_text = nil, nil, nil
 
     else
       if pending and text:match("^#+%s") then
         emit(text .. " " .. attributes.to_pandoc_attr(pending))
-        pending = nil
+        pending, pending_line, pending_text = nil, nil, nil
       elseif pending and text:match("^%s*$") then
         emit(text)   -- keep looking; blank lines do not clear a pending list
       else
-        if pending then
-          -- Attribute list belonged to something we do not handle here
-          -- (resources handle their own). Re-emit it verbatim for the
-          -- resource pass to pick up.
-          emit(attributes.to_pandoc_attr(pending))
-          pending = nil
-        end
+        -- resources.transform already ran, so nothing downstream will claim
+        -- this. Rendering it through to_pandoc_attr would drop bare words and
+        -- leak braces into the output; both are silent corruption.
+        reject_pending("attribute list precedes no element it can apply to")
         emit(text)
       end
       i = i + 1
     end
   end
+
+  -- A list in the final position still applies to nothing.
+  reject_pending("attribute list at end of input")
 
   return out
 end
@@ -819,7 +1001,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/blocks_spec.lua`
-Expected: PASS, 6 successes
+Expected: PASS, 12 successes
 
 - [ ] **Step 5: Commit**
 
@@ -884,6 +1066,28 @@ describe("inline.transform", function()
     local s = "Nothing special here at all."
     assert.equals(s, inline.transform(s, cfg))
   end)
+
+  it("does not double a percent sign in an index term", function()
+    -- gsub only reprocesses % when the replacement is a string; these use a
+    -- function, so escaping the replacement would corrupt rather than protect.
+    local out = inline.transform('The {ix: "100% coverage"} matters.', cfg)
+    assert.equals('The []{.index entry="100% coverage"} matters.', out)
+  end)
+
+  it("does not double a percent sign in inline math", function()
+    assert.equals("Value $a % b$ here.", inline.transform("Value `a % b`$ here.", cfg))
+  end)
+
+  it("tolerates a space before the colon", function()
+    -- attributes.lua accepts "{ix : ...}", so this pass must not disagree.
+    local out = inline.transform('A {ix : "term"} here.', cfg)
+    assert.equals('A []{.index entry="term"} here.', out)
+  end)
+
+  it("converts two index markers on one line", function()
+    local out = inline.transform('{ix: "a"} and {ix: "b"}', cfg)
+    assert.equals('[]{.index entry="a"} and []{.index entry="b"}', out)
+  end)
 end)
 ```
 
@@ -902,24 +1106,26 @@ Create `src/markua/inline.lua`:
 --- Inline Markua rewrites. Called only on non-code lines.
 local M = {}
 
--- Escape a string for safe use as a gsub replacement.
-local function literal(s)
-  return (s:gsub("%%", "%%%%"))
-end
+-- NOTE: no %-escaping helper here, deliberately. Lua reprocesses % in a gsub
+-- replacement only when the replacement is a string. Every gsub below passes a
+-- function, whose return value is used verbatim, so escaping would not be
+-- undone -- it would just double every literal % in the output, turning
+-- {ix: "100% coverage"} into entry="100%% coverage".
 
 function M.transform(text, cfg)
   -- Index markers: {ix: "term"} and the {i: "term"} variant.
-  -- Lua has no alternation, so loop over the configured keys.
+  -- Lua has no alternation, so loop over the configured keys. %s* after the
+  -- key mirrors attributes.lua, which tolerates "{ix : ...}".
   for _, key in ipairs(cfg.index_keys) do
-    local pattern = "{" .. key .. ':%s*"([^"]*)"%s*}'
+    local pattern = "{" .. key .. '%s*:%s*"([^"]*)"%s*}'
     text = text:gsub(pattern, function(term)
-      return literal('[]{.index entry="' .. term .. '"}')
+      return '[]{.index entry="' .. term .. '"}'
     end)
   end
 
   -- Inline math: `expr`$ becomes $expr$
   text = text:gsub("`([^`]-)`%$", function(expr)
-    return literal("$" .. expr .. "$")
+    return "$" .. expr .. "$"
   end)
 
   return text
@@ -931,7 +1137,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/inline_spec.lua`
-Expected: PASS, 6 successes
+Expected: PASS, 10 successes
 
 - [ ] **Step 5: Commit**
 
@@ -1008,6 +1214,24 @@ describe("resources.transform", function()
     local out = run("![Alt](a.png)\n")
     assert.is_truthy(out:find("![Alt](a.png)", 1, true))
   end)
+
+  it("does not emit a video as a pandoc image", function()
+    -- An Image node for an .mp4 becomes a broken <img> in EPUB and HTML.
+    local out = run("![A demo](v/demo.mp4)\n")
+    assert.is_truthy(out:find(".video-resource", 1, true))
+    assert.is_nil(out:find("![A demo](v/demo.mp4)", 1, true))
+  end)
+
+  it("dispatches audio to its own resource span", function()
+    local out = run("![Intro](a/intro.mp3)\n")
+    assert.is_truthy(out:find(".audio-resource", 1, true))
+  end)
+
+  it("never rewrites a resource line inside a code fence", function()
+    local out = run("```markua\n{height: \"80%\"}\n![x](d.png)\n```\n")
+    assert.is_truthy(out:find('{height: "80%"}', 1, true))
+    assert.is_nil(out:find("height=", 1, true))
+  end)
 end)
 ```
 
@@ -1022,6 +1246,11 @@ Create `src/markua/resources.lua`:
 
 ```lua
 --- Markua resources: one syntax, many media, dispatched by extension.
+--
+-- Only images survive as pandoc Images. Everything else -- code, tables, math,
+-- video, audio -- becomes an annotated span for a later filter to lower into
+-- whatever the target format supports, because pandoc has no native node for
+-- them. Emitting a video as an Image would produce a broken <img> in EPUB.
 local attributes = require("src.markua.attributes")
 
 local M = {}
@@ -1094,7 +1323,8 @@ function M.transform(lines, file)
       local alt, path, title = text:match('^!%[(.-)%]%(([^%s)]+)%s*(.-)%)%s*$')
       if path then
         local kind = M.kind(path)
-        if kind == "code" or kind == "table" or kind == "math" then
+        if kind == "code" or kind == "table" or kind == "math"
+           or kind == "video" or kind == "audio" then
           local parsed = pending or { id = nil, classes = {}, keyvals = {}, bare = {} }
           parsed.classes[#parsed.classes + 1] = kind .. "-resource"
           parsed.keyvals["src"] = path
@@ -1130,7 +1360,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/resources_spec.lua`
-Expected: PASS, 6 successes
+Expected: PASS, 9 successes
 
 - [ ] **Step 5: Commit**
 
@@ -1227,7 +1457,7 @@ In the attribute-line branch, before the `MATTER` check, add:
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/blocks_spec.lua`
-Expected: PASS, 9 successes
+Expected: PASS, 15 successes
 
 - [ ] **Step 5: Commit**
 
@@ -1274,7 +1504,15 @@ set -uo pipefail
 fail=0
 for md in test/golden/*.md; do
     expected="${md%.md}.native"
-    actual=$(pandoc --from=src/markua.lua --to=native "$md" 2>&1)
+    # Check the exit status before anything else. Without this, UPDATE=1 would
+    # happily write a crash's stderr into the .native file, and every later run
+    # would diff that stack trace against itself and report ok.
+    if ! actual=$(pandoc --from=src/markua.lua --to=native "$md" 2>&1); then
+        echo "FAIL $md (pandoc exited non-zero)"
+        printf '%s\n' "$actual" | sed 's/^/    /'
+        fail=1
+        continue
+    fi
     if [ "${UPDATE:-0}" = "1" ]; then
         printf '%s\n' "$actual" > "$expected"
         echo "updated $expected"
@@ -1559,29 +1797,32 @@ Create `src/filters/callouts.lua`:
 -- makes the writer emit a named style that a --reference-doc template can
 -- format. Rename the values below to match a publisher's template.
 
-local CALLOUT_STYLE = {
-  tip         = "Callout Tip",
-  note        = "Callout Note",
-  information = "Callout Information",
-  warning     = "Callout Warning",
-  error       = "Callout Error",
-  question    = "Callout Question",
-  discussion  = "Callout Discussion",
-  exercise    = "Callout Exercise",
-}
-
 local ASIDE_STYLE = "Aside"
+
+-- Derive the style name from the class the reader already attached, rather
+-- than from a hardcoded list. config.lua lets a book override callout_classes,
+-- and a duplicated table here would silently no-op on any class outside it --
+-- the callout would flatten into body text with no error.
+local function style_name(class)
+  local words = {}
+  for word in class:gmatch("[^%-_]+") do
+    words[#words + 1] = word:sub(1, 1):upper() .. word:sub(2)
+  end
+  return "Callout " .. table.concat(words, " ")
+end
 
 function Div(el)
   if el.classes:includes("aside") then
     el.attributes["custom-style"] = ASIDE_STYLE
     return el
   end
-  for _, class in ipairs(el.classes) do
-    local style = CALLOUT_STYLE[class]
-    if style then
-      el.attributes["custom-style"] = style
-      return el
+  -- The reader marks every blurb with .blurb plus its callout class.
+  if el.classes:includes("blurb") then
+    for _, class in ipairs(el.classes) do
+      if class ~= "blurb" then
+        el.attributes["custom-style"] = style_name(class)
+        return el
+      end
     end
   end
 end
@@ -1741,6 +1982,14 @@ xe=$(for d in "$tmp"/*.docx; do unzip -p "$d" word/document.xml; done \
 echo "Word index fields produced: $xe"
 
 [ "$fail" -eq 0 ] || exit 1
+
+# Converting without crashing is not the same as converting correctly. A
+# regression that drops every index entry still exits 0 unless this is checked,
+# and index preservation is the reason this project exists.
+if [ "$xe" -eq 0 ]; then
+    echo "FAIL: no Word index fields produced across the whole manuscript"
+    exit 1
+fi
 ```
 
 ```bash

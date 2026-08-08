@@ -27,8 +27,8 @@ jobs:
           # Do not leave a usable token in the git config for them.
           persist-credentials: false
 
-      # mise provisions the pinned dev tools (bun, etc.) from mise.toml.
-      # install + cache keep CI in lockstep with local dev.
+      # mise provisions the pinned toolchain (lua, pandoc, just, shellcheck)
+      # from mise.toml. install + cache keep CI in lockstep with local dev.
       - name: Set up mise tools
         uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4.2.3
         with:
@@ -56,41 +56,55 @@ jobs:
           luarocks install --local busted
           luarocks path --lr-bin | tr ':' '\n' >> "$GITHUB_PATH"
 
-      # The suite arrives incrementally: the justfile and test/ in Task 1,
-      # test/golden.sh in Task 9, test/filters.sh in Task 10, test/cli.sh in
-      # Task 12. Gate each phase on its own assets, so an intermediate PR is not
-      # failed by a recipe whose script does not exist yet, and say out loud what
-      # was skipped. `unit` needs test/ as well as the runner: busted against a
-      # missing directory is either an error or a meaninglessly green run.
-      - name: Detect available test assets
-        id: assets
+      # The suite arrives incrementally, so a phase runs only once it exists.
+      # Presence is decided by whether the JUSTFILE defines the recipe, not by
+      # a path duplicated here: the justfile names the script, so renaming
+      # test/golden.sh without updating it makes `just golden` FAIL loudly
+      # rather than silently skipping forever. Skips are warnings, not notices,
+      # so they surface in the PR rather than only in the job log.
+      - name: Detect available test phases
+        id: phases
         run: |
-          detect() {
-            if [ -e "$2" ]; then
-              echo "$1=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "$1=false" >> "$GITHUB_OUTPUT"
-              echo "::notice title=Phase unavailable::$2 not present; the '$1' phase was skipped. See docs/plan.md."
-            fi
+          recipes=""
+          if [ -f justfile ]; then
+            recipes=$(just --summary 2>/dev/null || true)
+          else
+            echo "::warning title=Phase skipped::No justfile yet; no test phase ran. See docs/plan.md Task 1."
+          fi
+
+          has_recipe() {
+            echo "$recipes" | tr ' ' '\n' | grep -qx "$1"
           }
-          detect runner  justfile
-          detect unit    test
-          detect golden  test/golden.sh
-          detect filters test/filters.sh
-          detect cli     test/cli.sh
+
+          for phase in unit golden filters cli; do
+            ok=true
+            reason=""
+            if ! has_recipe "$phase"; then
+              ok=false
+              reason="the justfile has no '$phase' recipe yet"
+            elif [ "$phase" = unit ] && [ ! -d test ]; then
+              # busted exits 1 on a missing tree; skipping is the clearer signal.
+              ok=false
+              reason="test/ does not exist yet"
+            fi
+            echo "$phase=$ok" >> "$GITHUB_OUTPUT"
+            if [ "$ok" = false ]; then
+              echo "::warning title=Phase skipped::${reason}; the '$phase' phase did not run. See docs/plan.md."
+            fi
+          done
 
       - name: Unit tests (busted)
-        if: steps.assets.outputs.runner == 'true' && steps.assets.outputs.unit == 'true'
+        if: steps.phases.outputs.unit == 'true'
         run: just unit
 
       - name: Golden-file tests
-        if: steps.assets.outputs.runner == 'true' && steps.assets.outputs.golden == 'true'
+        if: steps.phases.outputs.golden == 'true'
         run: just golden
 
       - name: Filter integration tests
-        if: steps.assets.outputs.runner == 'true' && steps.assets.outputs.filters == 'true'
+        if: steps.phases.outputs.filters == 'true'
         run: just filters
 
       - name: CLI tests
-        if: steps.assets.outputs.runner == 'true' && steps.assets.outputs.cli == 'true'
+        if: steps.phases.outputs.cli == 'true'
         run: just cli

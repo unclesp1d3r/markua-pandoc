@@ -1,6 +1,9 @@
 redactions = [ "*_SECRET", "*_KEY", "*_PASSWORD" ]
 
-# Many tools are set to "latest" to take advantage of idiomatic version files, which will automatically update the tool to the latest version when the version file is updated. This allows us to keep our tools up to date without having to manually update the version in this configuration file.
+# Tools set to "latest" resolve at install time and are then pinned by
+# mise.lock, so a lockfile bump -- not this file -- is what moves a version.
+# (Idiomatic version files are a separate mechanism, enabled below only for
+# bun and python, neither of which is declared here.)
 [tools]
 just                = "latest"
 lua                 = "5.4.8"
