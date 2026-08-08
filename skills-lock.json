@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "lua": {
+      "source": "mindrally/skills",
+      "sourceType": "github",
+      "skillPath": "lua/SKILL.md",
+      "computedHash": "46a1cb96c640e5dd186aee548d329217338fc160088b81696fbe5e809b150002"
+    }
+  }
+}

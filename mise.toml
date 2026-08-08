@@ -1,0 +1,35 @@
+redactions = [ "*_SECRET", "*_KEY", "*_PASSWORD" ]
+
+# Tools set to "latest" resolve at install time and are then pinned by
+# mise.lock, so a lockfile bump -- not this file -- is what moves a version.
+# (Idiomatic version files are a separate mechanism, enabled below only for
+# bun and python, neither of which is declared here.)
+[tools]
+just                = "latest"
+lua                 = "5.4.8"
+pandoc              = "3.10.1"
+shellcheck          = "latest"
+"pipx:pre-commit"   = "latest"
+lua-language-server = "3.18.2"
+
+# Many of these settings are defaults, but we are explicit in case they change in the future and to make it clear to users what is enabled.
+[settings]
+activate_aggressive                 = true
+env_cache                           = true
+exec_auto_install                   = true
+github_attestations                 = true
+idiomatic_version_file_enable_tools = [ "bun", "python" ]
+lockfile                            = true
+pin                                 = true
+slsa                                = true
+
+[settings.npm]
+package_manager = "bun"
+
+[settings.pipx]
+uvx = true
+
+[env]
+ECC_DISABLED_HOOKS = "pre:bash:gateguard-fact-force,pre:edit-write:gateguard-fact-force"
+ECC_GATEGUARD      = "off"
+_.file             = [ '.env', ".env.local" ]

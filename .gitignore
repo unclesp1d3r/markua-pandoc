@@ -1,8 +1,81 @@
-# Created by https://www.toptal.com/developers/gitignore/api/visualstudiocode,macos
-# Edit at https://www.toptal.com/developers/gitignore?templates=visualstudiocode,macos
+# Ordered most-project-specific first, so the rules that actually matter to
+# markua-pandoc are at the top and the generic OS noise is out of the way.
+#
+# Sections:
+#   1. Build output
+#   2. Lua toolchain
+#   3. Secrets and local overrides
+#   4. Re-includes that override a wider global gitignore
+#   5. Editors and tools
+#   6. Operating system noise
 
-### macOS ###
-# General
+# ---------------------------------------------------------------------------
+# 1. Build output
+# ---------------------------------------------------------------------------
+# Converted books. `bin/markua` writes wherever -o points, so these are matched
+# by extension rather than by directory. Force-add with `git add -f` if a test
+# fixture ever needs to be one of these.
+build/
+*.docx
+*.epub
+*.pdf
+
+# ---------------------------------------------------------------------------
+# 2. Lua toolchain
+# ---------------------------------------------------------------------------
+# Local rock trees from `luarocks install --local` and per-project installs.
+.luarocks/
+lua_modules/
+luacov.stats.out
+luacov.report.out
+
+# ---------------------------------------------------------------------------
+# 3. Secrets and local overrides
+# ---------------------------------------------------------------------------
+# mise.toml loads .env and .env.local. These are ignored here, in the repo,
+# rather than relying on a contributor's global gitignore — that is not a
+# control. .env.example stays committable so the template can be checked in.
+.env
+.env.*
+!.env.example
+
+# Personal, machine-local variants of any tracked file: settings.local.json,
+# CLAUDE.local.md, and friends.
+**/*.local.*
+
+# ---------------------------------------------------------------------------
+# 4. Re-includes that override a wider global gitignore
+# ---------------------------------------------------------------------------
+# A global gitignore commonly excludes bin/ as a build-artifact directory. Here
+# bin/markua is source — the pandoc CLI wrapper — so the directory must be
+# re-included. The `!bin/` line is required: git will not descend into an
+# excluded directory, so `!bin/markua` on its own would never match.
+!bin/
+
+# ---------------------------------------------------------------------------
+# 5. Editors and tools
+# ---------------------------------------------------------------------------
+# VS Code: ignore the directory but keep the settings a team shares.
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+
+# Local file history
+.history/
+.history
+.ionide
+
+# Built VS Code extensions
+*.vsix
+
+# ---------------------------------------------------------------------------
+# 6. Operating system noise
+# ---------------------------------------------------------------------------
+# macOS. Originally from
+# https://www.toptal.com/developers/gitignore/api/visualstudiocode,macos
 .DS_Store
 .AppleDouble
 .LSOverride
@@ -30,29 +103,5 @@ Network Trash Folder
 Temporary Items
 .apdisk
 
-### macOS Patch ###
-# iCloud generated files
+# iCloud
 *.icloud
-
-### VisualStudioCode ###
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-!.vscode/*.code-snippets
-
-# Local History for Visual Studio Code
-.history/
-
-# Built Visual Studio Code Extensions
-*.vsix
-
-### VisualStudioCode Patch ###
-# Ignore all local history of files
-.history
-.ionide
-
-# End of https://www.toptal.com/developers/gitignore/api/visualstudiocode,macos
-
-**/*.local.*

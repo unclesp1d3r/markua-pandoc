@@ -1,0 +1,61 @@
+name: Bug report
+description: Something converts incorrectly, crashes, or produces wrong output.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A minimal Markua snippet that reproduces the problem is worth more than
+        any description. Two or three lines is usually enough.
+
+  - type: textarea
+    id: markua
+    attributes:
+      label: Markua input
+      description: The smallest input that reproduces this.
+      render: markdown
+      placeholder: |
+        {class: tip}
+        B> Press `Ctrl-R` to search history.
+    validations:
+      required: true
+
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      placeholder: ./bin/markua chapter.md -o out.docx
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: Paste any error output verbatim, including the file:line prefix.
+    validations:
+      required: true
+
+  - type: input
+    id: pandoc
+    attributes:
+      label: pandoc version
+      description: Output of `pandoc --version | head -1`. Must be 3.10 or newer.
+      placeholder: pandoc 3.10.1
+    validations:
+      required: true
+
+  - type: input
+    id: lua
+    attributes:
+      label: Lua version
+      placeholder: Lua 5.4.6
+    validations:
+      required: false

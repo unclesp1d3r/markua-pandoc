@@ -1,0 +1,299 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+tone_instructions:
+  "Technical, professional, concise. Focus on actionable feedback. Match project culture: decisive,
+  correctness-focused, pattern-driven. Reference AGENTS.md for the architecture and the load-bearing
+  constraints. Be direct, avoid editorializing."
+
+early_access: true
+
+inheritance: true
+
+reviews:
+  profile: chill
+  poem: false
+  high_level_summary_instructions: |-
+    Provide a concise summary (3-5 bullets) covering:
+        1. What changed (which pipeline stage, filter, or CLI surface)
+        2. Technical approach (pure-Lua rewrite vs pandoc.read delegation vs AST filter)
+        3. Testing coverage (busted specs, golden .native files, DOCX XML assertions, whole-book smoke test)
+        4. Markua syntax coverage added, changed, or newly rejected
+        5. Follow-up items or known limitations
+
+    Keep it technical and focused on implementation details.
+  high_level_summary_in_walkthrough: true
+  auto_title_instructions: |
+    Generate PR titles following conventional commit format:
+    - Type: feat, fix, refactor, docs, test, chore, style, perf, ci
+    - Scope: module or surface (scanner, attributes, blocks, inline, resources,
+      reader, filters, cli, plan) — optional
+    - Breaking change: append `!` before the colon
+    - Description: concise, imperative mood
+
+    Examples:
+    - "feat(scanner): track fence state across tilde blocks"
+    - "fix(resources): stop dropping bare words from re-emitted attribute lines"
+    - "feat(blocks)!: reject quizzes instead of passing them through"
+
+    Prefer specific scopes over generic ones. Use kebab-case for multi-word scopes.
+
+    This repo squash-merges with the PR title as the commit subject, so the
+    title is the permanent commit message. If the PR contains a breaking
+    change, the `!` is REQUIRED — never drop or omit it when suggesting a
+    title, because the branch commits that carried it are discarded at merge.
+  collapse_walkthrough: false
+  estimate_code_review_effort: false
+  labeling_instructions:
+    - label: bug
+      instructions: Apply when PR fixes broken functionality, error handling, or incorrect conversion output.
+    - label: enhancement
+      instructions: Apply when PR improves existing behavior or adds new capability.
+    - label: markua-coverage
+      instructions: Apply when PR adds, changes, or rejects support for a Markua syntax construct.
+    - label: out-of-scope
+      instructions: >
+        Apply when PR implements something the plan explicitly excluded — quizzes, exercises,
+        smart crosslinks, Book.txt assembly, emoji shortcodes, or Leanpub document settings.
+        See the out-of-scope section at the end of docs/plan.md.
+    - label: "area:reader"
+      instructions: >
+        Apply when PR modifies src/markua.lua or the pure-Lua pipeline under src/markua/
+        (scanner, attributes, blocks, inline, resources, config, errors).
+    - label: "area:filters"
+      instructions: Apply when PR modifies src/filters/ — the AST post-processing that emits Word XE fields and named styles.
+    - label: "area:cli"
+      instructions: Apply when PR modifies bin/markua.
+    - label: "area:tests"
+      instructions: Apply when PR adds or modifies busted specs, golden fixtures, or the shell harnesses under test/.
+    - label: "area:build"
+      instructions: Apply when PR modifies the justfile, rockspec, mise.toml, pre-commit config, or CI workflows.
+    - label: documentation
+      instructions: Apply when PR changes docs/, AGENTS.md, CONTRIBUTING.md, or README.md.
+    - label: security
+      instructions: "Apply when PR touches credential handling in CI, shell quoting in the harnesses, or path handling in the CLI wrapper."
+  auto_apply_labels: true
+  auto_assign_reviewers: true
+  path_filters:
+    - "!build/**"
+    - "!.luarocks/**"
+    - "!lua_modules/**"
+    - "!*.docx"
+    - "!*.epub"
+    - "!*.pdf"
+    - "!mise.lock"
+    - "!.env*"
+    - "!*.log"
+    - "!*.pem"
+    - "!*.key"
+    - "!*.crt"
+    - "!.idea/**"
+    - "!.vscode/**"
+    - "!*.swp"
+    - "!*.swo"
+    - "!*~"
+    - "!.claude/**"
+    - "!.agents/**"
+    - "!.cursor/**"
+    - "!.codex/**"
+    - "!CLAUDE.md"
+    - "!skills-lock.json"
+    - "!*.tmp"
+    - "!*.temp"
+    - "!*.bak"
+  path_instructions:
+    - path: "src/markua/**"
+      instructions: |
+        Pure Lua, and it must stay that way. These modules MUST NOT reference the `pandoc`
+        global or require any pandoc module — busted runs under system Lua where that global
+        does not exist, so a single reference makes the module untestable. Flag any such
+        reference as a blocking issue.
+
+        Every transform must be fence-aware: consume `scanner.scan` output and check
+        `in_code` before matching. Real manuscripts contain JSON code blocks whose lines
+        start with `{`, and a naive attribute-list match corrupts them. A transform that
+        inspects only `.text` without consulting `.in_code` is a bug even when the tests pass.
+
+        Unknown constructs must raise a MarkuaError carrying file and line. Never let an
+        unrecognized `{...}` attribute line fall through as literal braces — a silent
+        pass-through is a corrupted book that surfaces only in the proof copy.
+
+        Lua patterns, not regex: no alternation, no lookahead, no non-greedy `+`. Multi-
+        alternative matching uses an explicit loop over a table of patterns. Flag any
+        pattern that assumes PCRE semantics.
+
+        Prefer immutable updates over mutating tables in place.
+    - path: "src/markua.lua"
+      instructions: |
+        The reader entry point, and one of the only files permitted to touch the `pandoc`
+        global. Keep it small: this is the surface busted cannot reach, so logic added here
+        is logic no unit test covers. Anything with branches belongs in src/markua/ instead.
+
+        Check the pass ordering. Passes re-scan between stages because a pass can change line
+        content and fence state must be recomputed rather than assumed. Also verify no pass
+        renders an attribute line through `to_pandoc_attr` when it does not own it — that
+        drops `bare` words and makes blurbs and matter directives invisible downstream.
+    - path: "src/filters/**"
+      instructions: |
+        Pandoc AST filters. Verify they degrade to no-ops for non-target writers: `openxml`
+        RawInline is ignored elsewhere, which is what makes these safe to always enable.
+        Check that text interpolated into raw OpenXML is XML-escaped.
+    - path: "test/**"
+      instructions: |
+        Golden `.native` files are the specification of the AST, so a regenerated golden must
+        be reviewed as a diff, not accepted wholesale — one generated from broken code locks
+        the bug in permanently. Flag golden changes that arrive without a corresponding source
+        change explaining them.
+
+        Shell harnesses need quoted expansions and a non-zero exit on failure; a harness that
+        cannot fail is worse than no harness.
+    - path: "docs/plan.md"
+      instructions: |
+        The authoritative design record. Lua shown here is copied verbatim by implementers, so
+        review it as production code: fence-awareness, error handling, and pattern correctness
+        all apply. Flag any drift between the plan and the code it describes.
+  slop_detection:
+    label: slop
+  finishing_touches:
+    unit_tests:
+      enabled: false
+    simplify:
+      enabled: true
+  pre_merge_checks:
+    title:
+      requirements: |
+        The PR title must follow Conventional Commits
+        (https://www.conventionalcommits.org):
+        `<type>[(<scope>)][!]: <description>`.
+        Types: feat, fix, refactor, docs, test, chore, style, perf, ci.
+
+        Both the scope and the `!` are OPTIONAL and independent. All four of
+        these are valid and must not be flagged:
+          - `docs: clarify the release process`
+          - `docs(scanner): clarify the fence rules`
+          - `feat!: drop the legacy crop aliases`
+          - `feat(blocks)!: reject quizzes instead of passing them through`
+        Do not require a scope, and do not treat `!` as only valid after one.
+
+        This repo squash-merges with the PR title as the commit subject, so a
+        breaking change MUST carry the `!` here — the branch commits that
+        marked it are discarded at merge, making the title the only surviving
+        record. If the diff removes or renames a public module function, a
+        supported Markua construct, a config key, or a CLI flag, or changes the
+        AST a golden file pins, require the `!` and a
+        `BREAKING CHANGE: <what breaks>` footer in the PR body. A prose
+        "Breaking change" heading is not that footer.
+
+  tools:
+    # The two that matter here: Lua sources and the shell test harnesses.
+    luacheck:
+      enabled: true
+    shellcheck:
+      enabled: true
+    actionlint:
+      enabled: true
+    # Catches GitHub Actions security smells such as persisted credentials.
+    zizmor:
+      enabled: true
+    yamllint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    # `just` is the task runner, so there is no Makefile to lint.
+    checkmake:
+      enabled: false
+    ruff:
+      enabled: false
+    hadolint:
+      enabled: false
+    swiftlint:
+      enabled: false
+    phpstan:
+      enabled: false
+    phpmd:
+      enabled: false
+    phpcs:
+      enabled: false
+    golangci-lint:
+      enabled: false
+    tflint:
+      enabled: false
+    detekt:
+      enabled: false
+    eslint:
+      enabled: false
+    flake8:
+      enabled: false
+    rubocop:
+      enabled: false
+    buf:
+      enabled: false
+    regal:
+      enabled: false
+    pmd:
+      enabled: false
+    clang:
+      enabled: false
+    cppcheck:
+      enabled: false
+    circleci:
+      enabled: false
+    clippy:
+      enabled: false
+    prismaLint:
+      enabled: false
+    pylint:
+      enabled: false
+    oxc:
+      enabled: false
+    shopifyThemeCheck:
+      enabled: false
+    brakeman:
+      enabled: false
+    htmlhint:
+      enabled: false
+    blinter:
+      enabled: false
+    emberTemplateLint:
+      enabled: false
+
+chat:
+  allow_non_org_members: false
+  integrations:
+    jira:
+      usage: disabled
+    linear:
+      usage: disabled
+
+knowledge_base:
+  opt_out: false
+  web_search:
+    enabled: true
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "AGENTS.md"
+      - "CONTRIBUTING.md"
+      - "docs/plan.md"
+  learnings:
+    scope: local
+  issues:
+    scope: local
+  jira:
+    usage: disabled
+  linear:
+    usage: disabled
+  pull_requests:
+    scope: local
+  mcp:
+    usage: enabled
+
+issue_enrichment:
+  auto_enrich:
+    enabled: true
+  planning:
+    enabled: false
+    auto_planning:
+      enabled: false
+  labeling:
+    auto_apply_labels: true

@@ -1,0 +1,32 @@
+name: Feature request
+description: A capability beyond Markua syntax coverage.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For missing Markua syntax, use the "Unsupported Markua construct" template
+        instead. Check the out-of-scope list at the end of `docs/plan.md` first —
+        several obvious ideas were rejected for structural reasons.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that you cannot do today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+    validations:
+      required: false
