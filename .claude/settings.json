@@ -1,6 +1,7 @@
 {
     "enabledPlugins": {
         "ecc@ecc": true,
-        "compound-engineering@compound-engineering-plugin": true
+        "compound-engineering@compound-engineering-plugin": true,
+        "comprehensive-review@claude-code-workflows": true
     }
 }
