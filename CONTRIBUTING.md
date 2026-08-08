@@ -124,7 +124,11 @@ fix: do not split attribute values on commas inside quotes
 test: golden case for hierarchical index entries
 ```
 
-Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`.
+Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `style`, `perf`, `ci`.
+
+This list is the same one `.coderabbit.yml` enforces on PR titles, and the
+two must stay in step: the repo squash-merges with the PR title as the commit
+subject, so a type rejected there cannot be merged.
 
 Sign off every commit with `git commit -s`. This adds the `Signed-off-by` trailer
 certifying you have the right to submit the work under the project's license.
