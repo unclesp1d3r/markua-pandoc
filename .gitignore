@@ -56,3 +56,14 @@ Temporary Items
 # End of https://www.toptal.com/developers/gitignore/api/visualstudiocode,macos
 
 **/*.local.*
+
+### markua-pandoc ###
+# Build output
+build/
+*.docx
+*.epub
+*.pdf
+
+# Lua toolchain
+.luarocks/
+lua_modules/
