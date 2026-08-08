@@ -14,10 +14,6 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # The custom reader API and GitHub-alert parsing both require pandoc 3.10+.
-  PANDOC_VERSION: "3.10.1"
-
 jobs:
   test:
     name: test (lua 5.4)
@@ -40,15 +36,25 @@ jobs:
           cache: true
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up LuaRocks
-        uses: leafo/gh-actions-luarocks@v6
+      # mise supplies lua, luarocks (bundled with the lua plugin), just and
+      # pandoc. Fail here with a readable message rather than in a later step.
+      # leafo/gh-actions-luarocks is deliberately absent: it configures against
+      # a ./.lua directory that only leafo/gh-actions-lua creates.
+      - name: Verify toolchain
+        run: |
+          lua -v
+          luarocks --version | head -1
+          just --version
+          pandoc --version | head -1
+          pandoc --version | head -1 | awk '{split($2, v, "."); if (v[1] < 3 || (v[1] == 3 && v[2] < 10))
+            { print "pandoc " $2 " is too old; the custom reader API needs 3.10+"; exit 1 }}'
 
+      # busted is a luarocks package rather than a mise tool. --lr-bin returns a
+      # colon-joined list, and $GITHUB_PATH takes one entry per line.
       - name: Install busted
-        run: luarocks install busted
-
-      # The recipes are run with just, which ubuntu-latest does not ship.
-      - name: Set up just
-        uses: extractions/setup-just@v4
+        run: |
+          luarocks install --local busted
+          luarocks path --lr-bin | tr ':' '\n' >> "$GITHUB_PATH"
 
       # The suite arrives incrementally: the justfile and test/ in Task 1,
       # test/golden.sh in Task 9, test/filters.sh in Task 10, test/cli.sh in
