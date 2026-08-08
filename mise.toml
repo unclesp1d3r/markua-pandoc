@@ -1,0 +1,27 @@
+redactions = [ "*_SECRET", "*_KEY", "*_PASSWORD" ]
+
+# Many tools are set to "latest" to take advantage of idiomatic version files, which will automatically update the tool to the latest version when the version file is updated. This allows us to keep our tools up to date without having to manually update the version in this configuration file.
+[tools]
+"pipx:pre-commit" = "latest"
+
+# Many of these settings are defaults, but we are explicit in case they change in the future and to make it clear to users what is enabled.
+[settings]
+activate_aggressive                 = true
+env_cache                           = true
+exec_auto_install                   = true
+github_attestations                 = true
+idiomatic_version_file_enable_tools = [ "bun", "python" ]
+lockfile                            = true
+pin                                 = true
+slsa                                = true
+
+[settings.npm]
+package_manager = "bun"
+
+[settings.pipx]
+uvx = true
+
+[env]
+ECC_DISABLED_HOOKS = "pre:bash:gateguard-fact-force,pre:edit-write:gateguard-fact-force"
+ECC_GATEGUARD      = "off"
+_.file             = [ '.env', ".env.local" ]
