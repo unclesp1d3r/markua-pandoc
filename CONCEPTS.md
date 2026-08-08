@@ -33,10 +33,11 @@ than silently dropped.
 ### Attribute list
 
 A brace-delimited line carrying keys, an id, or classes that configure the construct
-it attaches to. It is the syntactic substrate nearly every other Markua construct is
-built from, which is why an unrecognized attribute list is a hard error with file and
-line rather than something passed through as literal braces — silently emitting
-braces into a manuscript is worse than failing.
+it attaches to. It is the syntactic substrate most block-level Markua constructs are
+built from — though not all of them; some are recognized by a line prefix instead and
+never carry an attribute list. An unrecognized attribute list is a hard error naming
+file and line rather than something passed through as literal braces, because silently
+emitting braces into a manuscript is worse than failing. See Strict mode.
 
 ### Blurb
 
@@ -52,8 +53,8 @@ the set further, so the list is config-overridable by design.
 ### Aside
 
 A sibling block construct to a Blurb, distinguished by its semantic role in the book
-rather than by its syntax — it shares the Blurb's two syntactic forms and its
-configurable class set.
+rather than by its content. It shares the Blurb's configurable-class treatment, but
+only one input syntax is specified for it — a line prefix, with no fenced counterpart.
 
 ### Matter directive
 
@@ -75,6 +76,17 @@ markdown-to-markdown pipeline drops them, because markdown has nowhere to put th
 An included external file — figure, table, code listing, or embedded document.
 Resources share one syntax and are dispatched on the file extension, so the extension,
 not the author, decides which kind of output construct is produced.
+
+### Strict mode
+
+The default posture toward constructs the reader does not recognize: abort, naming the
+offending file and line. Lenient mode is the opt-in downgrade that turns those aborts
+into warnings and lets the conversion finish.
+
+The strict default exists because the failure it prevents is silent — an unrecognized
+construct that survives into the output becomes literal brace punctuation in a
+finished book. Lenient mode is for triaging an unfamiliar manuscript, not for
+production conversions.
 
 ## The pipeline
 
