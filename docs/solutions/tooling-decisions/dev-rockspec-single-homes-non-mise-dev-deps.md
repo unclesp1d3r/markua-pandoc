@@ -52,10 +52,14 @@ file.
 - **`--only-deps`, not `--deps-only`.** Both work on luarocks 3.x, but `--only-deps`
   has existed since 2.2.2 while the alias only arrived in 3.4.0. Verified in
   `src/luarocks/cmd/build.lua`, which declares `cmd:flag("--only-deps --deps-only")`.
-- **`build.type = "none"`.** The documented null build back-end. Under `--only-deps`,
-  `build_rockspec()` returns right after dependency resolution and never inspects
-  `build` at all, so this only guards a stray plain `luarocks make`. The reader ships
-  as a pandoc script, not an installable module.
+- **`build.type = "none"`.** The documented null build back-end. `build_rockspec()`
+  checks and initializes `rockspec.build` and `rockspec.build.type` *before* it
+  processes dependencies -- an absent type is defaulted to `"builtin"` there. Under
+  `--only-deps` it then returns after dependency resolution and skips the build
+  driver, which is the only place the type is acted on. So declaring `none` is what
+  stops that `builtin` default from standing, and it makes a stray plain
+  `luarocks make` an intentional no-op instead of module auto-discovery. The reader
+  ships as a pandoc script, not an installable module.
 - **`source.url` is mandatory but inert.** luarocks requires `package`, `version`, and
   `source.url` for the rockspec to parse, but `--only-deps` never fetches the source.
   It points at the repo for documentation value only.
