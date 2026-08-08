@@ -8,16 +8,36 @@ for the full design record and task breakdown.
 
 ## Setup
 
-```sh
-# pandoc 3.10+ is required: the custom reader API depends on it.
-brew install pandoc lua luarocks        # macOS
-# sudo apt install pandoc lua5.4 luarocks   # Debian/Ubuntu
+**pandoc 3.10 or newer is required** — the custom reader API depends on it. Debian
+and Ubuntu package repositories ship older versions, so install from upstream there
+rather than from `apt`.
 
+```sh
+brew install pandoc lua luarocks          # macOS
+```
+
+```sh
+# Debian/Ubuntu: apt's pandoc is too old, take the upstream .deb
+PANDOC_VERSION=3.10.1
+curl -fsSL -o /tmp/pandoc.deb \
+  "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-amd64.deb"
+sudo dpkg -i /tmp/pandoc.deb
+sudo apt install lua5.4 luarocks
+```
+
+```sh
 luarocks install --local busted
 export PATH="$HOME/.luarocks/bin:$PATH"
+```
 
+Verify the toolchain, and fail loudly if pandoc is too old:
+
+```sh
 busted --version
+
 pandoc --version | head -1
+pandoc --version | head -1 | awk '{split($2, v, "."); if (v[1] < 3 || (v[1] == 3 && v[2] < 10))
+  { print "pandoc " $2 " is too old; 3.10+ required"; exit 1 } else print "pandoc " $2 " ok" }'
 ```
 
 ## Running the tests

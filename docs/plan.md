@@ -721,7 +721,12 @@ function M.transform(lines, cfg, file)
         local class = callout_class(parsed, cfg, file, rec.number) or "information"
         emit("::: {." .. class .. " .blurb}")
         i = i + 1
-        while i <= #lines and lines[i].text:match("^%s*{/blurb}%s*$") == nil do
+        -- A code example inside the blurb can legitimately contain {/blurb};
+        -- only a line outside a fence terminates it.
+        local function is_blurb_end(r)
+          return not r.in_code and r.text:match("^%s*{/blurb}%s*$") ~= nil
+        end
+        while i <= #lines and not is_blurb_end(lines[i]) do
           emit(lines[i].text)
           i = i + 1
         end
@@ -1026,6 +1031,19 @@ function M.transform(lines, file)
   local out = {}
   local pending, pending_line = nil, nil
 
+  -- Re-emitting a non-resource attribute line must reproduce it VERBATIM.
+  -- to_pandoc_attr drops `bare` words, so rendering through it would turn
+  -- {blurb, class: warning} into {.warning} and {frontmatter} into {}, and
+  -- blocks.transform (which runs after this pass) could never see them.
+  local pending_text = nil
+
+  local function flush_pending()
+    if pending_text then
+      out[#out + 1] = pending_text
+      pending, pending_text = nil, nil
+    end
+  end
+
   for i = 1, #lines do
     local rec = lines[i]
     local text = rec.text
@@ -1033,7 +1051,9 @@ function M.transform(lines, file)
     if rec.in_code then
       out[#out + 1] = text
     elseif attributes.is_attribute_line(text) then
+      flush_pending()
       pending = normalise(attributes.parse(text, file, rec.number))
+      pending_text = text
       pending_line = rec.number
     else
       local alt, path, title = text:match('^!%[(.-)%]%(([^%s)]+)%s*(.-)%)%s*$')
@@ -1051,20 +1071,20 @@ function M.transform(lines, file)
         else
           out[#out + 1] = text
         end
-        pending = nil
+        pending, pending_text = nil, nil
       else
         if pending and text:match("^%s*$") then
           out[#out + 1] = text
         else
-          if pending then
-            out[#out + 1] = attributes.to_pandoc_attr(pending)
-            pending = nil
-          end
+          flush_pending()
           out[#out + 1] = text
         end
       end
     end
   end
+
+  -- An attribute line in the last position still belongs in the output.
+  flush_pending()
 
   return out
 end

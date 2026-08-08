@@ -30,6 +30,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Later steps run repository-controlled commands (make, test/*.sh).
+          # Do not leave a usable token in the git config for them.
+          persist-credentials: false
 
       - name: Set up Lua ${{ matrix.lua-version }}
         uses: leafo/gh-actions-lua@v13
@@ -49,30 +53,38 @@ jobs:
           sudo dpkg -i /tmp/pandoc.deb
           pandoc --version | head -1
 
-      # The test suite arrives with Task 1 of docs/plan.md. Until the Makefile
-      # exists there is nothing to run, and a loud notice beats a silent pass.
-      - name: Detect project skeleton
-        id: skeleton
+      # The suite arrives incrementally: Makefile in Task 1, test/golden.sh in
+      # Task 9, test/filters.sh in Task 10, test/cli.sh in Task 12. Gate each
+      # phase on its own assets, so an intermediate PR is not failed by a target
+      # whose script does not exist yet, and say out loud what was skipped.
+      - name: Detect available test assets
+        id: assets
         run: |
-          if [ -f Makefile ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Skeleton not present::No Makefile yet; see docs/plan.md Task 1. Test steps skipped."
-          fi
+          detect() {
+            if [ -e "$2" ]; then
+              echo "$1=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "$1=false" >> "$GITHUB_OUTPUT"
+              echo "::notice title=Phase unavailable::$2 not present; the '$1' phase was skipped. See docs/plan.md."
+            fi
+          }
+          detect unit    Makefile
+          detect golden  test/golden.sh
+          detect filters test/filters.sh
+          detect cli     test/cli.sh
 
       - name: Unit tests (busted)
-        if: steps.skeleton.outputs.present == 'true'
+        if: steps.assets.outputs.unit == 'true'
         run: make unit
 
       - name: Golden-file tests
-        if: steps.skeleton.outputs.present == 'true'
+        if: steps.assets.outputs.unit == 'true' && steps.assets.outputs.golden == 'true'
         run: make golden
 
       - name: Filter integration tests
-        if: steps.skeleton.outputs.present == 'true'
+        if: steps.assets.outputs.unit == 'true' && steps.assets.outputs.filters == 'true'
         run: make filters
 
       - name: CLI tests
-        if: steps.skeleton.outputs.present == 'true'
+        if: steps.assets.outputs.unit == 'true' && steps.assets.outputs.cli == 'true'
         run: make cli
