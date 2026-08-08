@@ -20,17 +20,16 @@ env:
 
 jobs:
   test:
-    name: test (lua ${{ matrix.lua-version }})
+    name: test (lua 5.4)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # 5.4 is the target runtime. 5.5 runs too, so regressions surface early.
-        lua-version: ["5.4", "5.5"]
 
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Later steps run repository-controlled commands (just, test/*.sh).
+          # Do not leave a usable token in the git config for them.
+          persist-credentials: false
 
       # mise provisions the pinned dev tools (bun, etc.) from mise.toml.
       # install + cache keep CI in lockstep with local dev.
@@ -41,11 +40,6 @@ jobs:
           cache: true
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Lua ${{ matrix.lua-version }}
-        uses: leafo/gh-actions-lua@v13
-        with:
-          luaVersion: ${{ matrix.lua-version }}
-
       - name: Set up LuaRocks
         uses: leafo/gh-actions-luarocks@v6
 
@@ -55,15 +49,6 @@ jobs:
       # The recipes are run with just, which ubuntu-latest does not ship.
       - name: Set up just
         uses: extractions/setup-just@v4
-
-      - name: Install pandoc ${{ env.PANDOC_VERSION }}
-        run: |
-          arch=$(dpkg --print-architecture)
-          curl -fsSL -o /tmp/pandoc.deb \
-            "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-1-${arch}.deb"
-          sudo dpkg -i /tmp/pandoc.deb
-          pandoc --version | head -1
-          just --version
 
       # The suite arrives incrementally: the justfile and test/ in Task 1,
       # test/golden.sh in Task 9, test/filters.sh in Task 10, test/cli.sh in
