@@ -4,7 +4,7 @@ redactions = [ "*_SECRET", "*_KEY", "*_PASSWORD" ]
 [tools]
 just                = "latest"
 lua                 = "5.4.8"
-pandoc              = "latest"
+pandoc              = "3.10.1"
 shellcheck          = "latest"
 "pipx:pre-commit"   = "latest"
 lua-language-server = "3.18.2"
