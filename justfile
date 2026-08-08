@@ -15,9 +15,9 @@ test: unit
 unit:
     busted test/
 
-# Install dev dependencies (busted is a luarocks package, not a mise tool).
+# Install dev dependencies from the rockspec (busted is a luarocks package, not a mise tool).
 install:
-    luarocks install --local busted
+    luarocks install --local --only-deps markua-pandoc-dev-1.rockspec
 
 # Full setup from a clean checkout: mise owns the toolchain, luarocks owns busted.
 setup:

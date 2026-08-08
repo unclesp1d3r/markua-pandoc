@@ -28,7 +28,7 @@
 markua-pandoc/
 ├── README.md
 ├── justfile                        # test, lint, install recipes
-├── markua-pandoc-dev-1.rockspec    # busted dependency for `luarocks test`
+├── markua-pandoc-dev-1.rockspec    # declares busted; `just install` reads it
 ├── bin/
 │   └── markua                      # POSIX sh wrapper around pandoc
 ├── src/
@@ -91,10 +91,13 @@ mkdir -p src/markua src/filters bin test/golden
 
 busted runs under system Lua and will NOT have pandoc's `pandoc` module. That is intentional and shapes the whole design.
 
+mise owns the toolchain -- do not `brew install lua`, or the interpreter under
+test stops matching the pinned one that CI and pandoc use. The lua plugin
+bundles luarocks, so busted is the only thing luarocks fetches directly.
+
 ```bash
-brew install lua luarocks     # macOS; use your distro's packages on Linux
-luarocks install --local busted
-echo 'export PATH="$HOME/.luarocks/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+just setup                    # mise install, then `just install` for busted
+export PATH="$HOME/.luarocks/bin:$PATH"
 busted --version
 ```
 
@@ -206,9 +209,9 @@ test: unit
 unit:
     busted test/
 
-# Install dev dependencies (busted is a luarocks package, not a mise tool).
+# Install dev dependencies from the rockspec (busted is a luarocks package, not a mise tool).
 install:
-    luarocks install --local busted
+    luarocks install --local --only-deps markua-pandoc-dev-1.rockspec
 
 # Full setup from a clean checkout: mise owns the toolchain, luarocks owns busted.
 setup:
@@ -223,7 +226,52 @@ clean:
     rm -rf build
 ```
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 8: Add the dev rockspec**
+
+`just install` and CI each hardcoded `luarocks install --local busted`, so the
+one Lua dependency was named in two places. The rockspec is that name's single
+home; `--only-deps` installs what it declares without building the rock, so
+`build.type = "none"` is correct -- the reader ships as a pandoc script, not as
+a luarocks module.
+
+Create `markua-pandoc-dev-1.rockspec`:
+
+```lua
+package = "markua-pandoc"
+version = "dev-1"
+
+source = {
+  url = "git+https://github.com/unclesp1d3r/markua-pandoc.git",
+}
+
+description = {
+  summary  = "A pandoc custom reader for Markua 0.30",
+  homepage = "https://github.com/unclesp1d3r/markua-pandoc",
+  license  = "Apache-2.0",
+}
+
+-- Development dependencies only. lua itself comes from mise, not luarocks, but
+-- declaring the floor keeps `luarocks install --only-deps` honest about it.
+dependencies = {
+  "lua >= 5.4",
+  "busted",
+}
+
+-- Nothing to build: the reader is a pandoc script, not an installable module.
+build = {
+  type = "none",
+}
+```
+
+Then point the `install` recipe at it and drop the duplicate from
+`.github/workflows/ci.yml`:
+
+```just
+install:
+    luarocks install --local --only-deps markua-pandoc-dev-1.rockspec
+```
+
+- [ ] **Step 9: Commit**
 
 ```bash
 git add -A
