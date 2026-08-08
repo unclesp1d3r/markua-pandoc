@@ -15,12 +15,14 @@ drifting apart.
 
 ```sh
 mise install     # the pinned toolchain
-just setup       # the above, plus busted
+just setup       # the above, plus the luarocks packages
 ```
 
-`busted` is the one exception: it is a luarocks package rather than a mise tool,
-so `just setup` fetches it after `mise install`. The lua plugin bundles luarocks,
-so it is already on your path. Add the rock binaries to yours:
+`busted` and `luacheck` are the exceptions: both are luarocks packages rather
+than mise tools, so `just setup` fetches them after `mise install`. They are
+declared once in `markua-pandoc-dev-1.rockspec`, which `just install` reads. The
+lua plugin bundles luarocks, so it is already on your path. Add the rock
+binaries to yours:
 
 ```sh
 export PATH="$HOME/.luarocks/bin:$PATH"
@@ -49,7 +51,14 @@ tool missing a Linux entry fails the build.
 just           # list every available recipe
 just test      # everything currently wired up
 just unit      # busted specs only — fast, run these constantly
+just lint      # every pre-commit hook across all files
 ```
+
+`just lint` is the same gate CI runs. It includes **luacheck**, so Lua problems
+surface locally rather than waiting for review. luacheck is a luarocks package
+rather than a mise tool, so `just setup` installs it from the rockspec alongside
+busted; the hook finds it through `luarocks path --lr-bin` even when
+`~/.luarocks/bin` is not on your PATH.
 
 Recipes arrive with the scripts they run, so `just --list` is the authoritative
 answer to what exists today. `golden`, `filters` and `cli` are added by Tasks 9,

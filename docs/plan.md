@@ -28,7 +28,7 @@
 markua-pandoc/
 ├── README.md
 ├── justfile                        # test, lint, install recipes
-├── markua-pandoc-dev-1.rockspec    # busted dependency for `luarocks test`
+├── markua-pandoc-dev-1.rockspec    # declares busted; `just install` reads it
 ├── bin/
 │   └── markua                      # POSIX sh wrapper around pandoc
 ├── src/
@@ -83,27 +83,56 @@ this is only the source tree. Do **not** recreate `.gitignore`: the committed
 one is considerably more than these five lines, and it carries a `!bin/`
 re-include that a wider global gitignore would otherwise defeat.
 
+Create only the directories this task puts files in. Git does not track empty
+directories, so `src/filters`, `bin` and `test/golden` would not survive a
+clone; Tasks 9 through 12 create them alongside their first file.
+
 ```bash
-mkdir -p src/markua src/filters bin test/golden
+mkdir -p src/markua test
 ```
 
 - [ ] **Step 2: Install the Lua toolchain**
 
 busted runs under system Lua and will NOT have pandoc's `pandoc` module. That is intentional and shapes the whole design.
 
+mise owns the toolchain -- do not `brew install lua`, or the interpreter under
+test stops matching the pinned one that CI and pandoc use. The lua plugin
+bundles luarocks, so busted is the only thing luarocks fetches directly.
+
 ```bash
-brew install lua luarocks     # macOS; use your distro's packages on Linux
-luarocks install --local busted
-echo 'export PATH="$HOME/.luarocks/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+just setup                    # mise install, then `just install` for busted
+export PATH="$HOME/.luarocks/bin:$PATH"
 busted --version
 ```
 
 - [ ] **Step 3: Write the failing test**
 
-Create `test/errors_spec.lua`:
+Create `test/errors_spec.lua` (this is the shipped file, verbatim):
 
 ```lua
+-- Spec for the structured error type (src/markua/errors.lua).
+--
+-- Written before the module exists: Task 1's TDD cycle starts red. Run with
+-- `busted test/errors_spec.lua` from the repo root -- require("src.markua.errors")
+-- resolves through stock package.path only from there.
 local errors = require("src.markua.errors")
+
+-- errors.warn writes straight to io.stderr, so swapping the handle is the only
+-- way to assert the Lenient path actually warned rather than silently returning.
+-- Restores the real handle before returning so a failure cannot leak the stub.
+-- errors.warn takes an optional sink, so the Lenient path's output can be
+-- asserted without swapping the global io.stderr out from under the suite.
+local function recording_sink()
+  local chunks = {}
+  return {
+    write = function(_, ...)
+      for _, piece in ipairs({ ... }) do
+        chunks[#chunks + 1] = piece
+      end
+    end,
+    text = function() return table.concat(chunks) end,
+  }
+end
 
 describe("errors", function()
   it("renders file and line in the message", function()
@@ -114,21 +143,55 @@ describe("errors", function()
   it("raises a structured error rather than a string", function()
     local ok, err = pcall(errors.raise, "a.md", 7, "boom")
     assert.is_false(ok)
-    assert.equals(7, err.line)
     assert.equals("a.md", err.file)
+    assert.equals(7, err.line)
     assert.equals("boom", err.message)
   end)
 
   it("reports fatally when strict", function()
-    local ok = pcall(errors.report, { strict = true }, "a.md", 1, "boom")
+    -- Assert the raised value, not just that something raised: report must
+    -- surface the structured error, not a bare string.
+    local ok, err = pcall(errors.report, { strict = true }, "a.md", 1, "boom")
     assert.is_false(ok)
+    assert.equals("a.md", err.file)
+    assert.equals(1, err.line)
+    assert.equals("boom", err.message)
   end)
 
   it("downgrades to a warning when not strict", function()
     -- Without this path cfg.strict is dead config and --lenient does nothing.
-    local ok, result = pcall(errors.report, { strict = false }, "a.md", 1, "boom")
-    assert.is_true(ok)
+    -- Asserting the written text is what proves the warning fired; checking the
+    -- return value alone still passes when the warn call is deleted outright.
+    local sink = recording_sink()
+    local result = errors.report({ strict = false, sink = sink }, "a.md", 1, "boom")
     assert.is_false(result)
+    assert.equals("warning: a.md:1: boom\n", sink.text())
+  end)
+
+  it("treats an absent or empty config as strict", function()
+    assert.is_false((pcall(errors.report, nil, "a.md", 1, "boom")))
+    assert.is_false((pcall(errors.report, {}, "a.md", 1, "boom")))
+  end)
+
+  it("treats a non-table config as strict rather than raising a raw index error", function()
+    -- A scalar cfg used to reach `cfg.strict` and raise "attempt to index a
+    -- number value" from inside this module, masking the real error.
+    local ok, err = pcall(errors.report, 5, "a.md", 1, "boom")
+    assert.is_false(ok)
+    assert.equals("boom", err.message)
+  end)
+
+  it("renders a nil line literally instead of raising from __tostring", function()
+    -- string.format("%s:%d: %s", ...) raises on a nil line (bad argument #3),
+    -- masking the real error. %s with tostring() on each field must not crash.
+    local err = errors.new("a.md", nil, "boom")
+    assert.equals("a.md:nil: boom", tostring(err))
+  end)
+
+  it("renders a non-integer line literally instead of raising from __tostring", function()
+    -- The other half of the %d hazard: %d rejects a float outright with
+    -- "number has no integer representation".
+    assert.equals("a.md:3.5: boom", tostring(errors.new("a.md", 3.5, "boom")))
   end)
 end)
 ```
@@ -143,34 +206,56 @@ Expected: FAIL with "module 'src.markua.errors' not found"
 Create `src/markua/errors.lua`:
 
 ```lua
---- Structured errors carrying source position.
+-- Structured errors carrying source position.
+--
+-- Every later module in this reader reports unknown constructs by file and
+-- line. A shared error type lets callers inspect `.file` / `.line` directly
+-- instead of parsing a rendered string back apart, and gives the documented
+-- --lenient flag a single place (report) where the Strict/Lenient choice is
+-- made.
 local M = {}
 
 local mt = {
+  -- %s with tostring() on every field, not %d (docs/plan.md's original
+  -- string.format("%s:%d: %s", ...)): %d raises on a nil or non-integer
+  -- line, and that secondary error inside __tostring would mask the real
+  -- one. CLI-level errors (Task 12) have no natural line number, so nil is
+  -- a real input, not a hypothetical.
   __tostring = function(e)
-    return string.format("%s:%d: %s", e.file, e.line, e.message)
+    return string.format("%s:%s: %s", tostring(e.file), tostring(e.line), tostring(e.message))
   end,
 }
 
+--- Construct a structured error carrying source position.
 function M.new(file, line, message)
   return setmetatable({ file = file, line = line, message = message }, mt)
 end
 
+--- Raise the table itself so callers can inspect .file / .line.
 function M.raise(file, line, message)
+  -- Level 0: Lua prepends position info only to string errors, and this
+  -- table already carries its own file/line.
   error(M.new(file, line, message), 0)
 end
 
 --- Report without aborting. Used only when config.strict is false, so the
 --- documented --lenient flag downgrades hard errors instead of being inert.
-function M.warn(file, line, message)
-  io.stderr:write("warning: " .. tostring(M.new(file, line, message)) .. "\n")
+--- `sink` defaults to stderr; passing one makes the output assertable, and is
+--- the seam a later caller would use to batch or cap a noisy full-book run.
+function M.warn(file, line, message, sink)
+  local out = sink or io.stderr
+  out:write("warning: ", tostring(M.new(file, line, message)), "\n")
 end
 
 --- Raise when strict, warn otherwise. Every unknown-construct path goes
 --- through here so leniency is one decision rather than scattered branches.
 function M.report(cfg, file, line, message)
-  if cfg and cfg.strict == false then
-    M.warn(file, line, message)
+  -- The type check is load-bearing: a nil cfg would raise a nil-index error
+  -- and a scalar one ("attempt to index a number value") would raise from
+  -- inside this module, masking the very error it was called to report.
+  -- Strict is the default for every shape except an explicit strict = false.
+  if type(cfg) == "table" and cfg.strict == false then
+    M.warn(file, line, message, cfg.sink)
     return false
   end
   M.raise(file, line, message)
@@ -182,7 +267,7 @@ return M
 - [ ] **Step 6: Run the tests and make sure they pass**
 
 Run: `busted test/errors_spec.lua`
-Expected: PASS, 4 successes
+Expected: PASS, 8 successes
 
 - [x] **Step 7: Add the justfile** — already in the repo
 
@@ -206,9 +291,9 @@ test: unit
 unit:
     busted test/
 
-# Install dev dependencies (busted is a luarocks package, not a mise tool).
+# Install dev dependencies from the rockspec (busted is a luarocks package, not a mise tool).
 install:
-    luarocks install --local busted
+    luarocks install --local --only-deps markua-pandoc-dev-1.rockspec
 
 # Full setup from a clean checkout: mise owns the toolchain, luarocks owns busted.
 setup:
@@ -223,7 +308,55 @@ clean:
     rm -rf build
 ```
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 8: Add the dev rockspec**
+
+`just install` and CI each hardcoded `luarocks install --local busted`, so the
+one Lua dependency was named in two places. The rockspec is that name's single
+home; `--only-deps` installs what it declares without building the rock, so
+`build.type = "none"` is correct -- the reader ships as a pandoc script, not as
+a luarocks module.
+
+Create `markua-pandoc-dev-1.rockspec`:
+
+```lua
+package = "markua-pandoc"
+version = "dev-1"
+
+source = {
+  url = "git+https://github.com/unclesp1d3r/markua-pandoc.git",
+}
+
+description = {
+  summary  = "A pandoc custom reader for Markua 0.30",
+  homepage = "https://github.com/unclesp1d3r/markua-pandoc",
+  license  = "Apache-2.0",
+}
+
+-- Development dependencies only. lua itself comes from mise, not luarocks, but
+-- declaring the floor keeps `luarocks install --only-deps` honest about it.
+dependencies = {
+  "lua >= 5.4",
+  -- Pinned to floors rather than left open: an unconstrained dependency lets a
+  -- clean CI run resolve a newer release than any commit chose.
+  "busted >= 2.2, < 3.0",
+  "luacheck >= 1.2, < 2.0",
+}
+
+-- Nothing to build: the reader is a pandoc script, not an installable module.
+build = {
+  type = "none",
+}
+```
+
+Then point the `install` recipe at it and drop the duplicate from
+`.github/workflows/ci.yml`:
+
+```just
+install:
+    luarocks install --local --only-deps markua-pandoc-dev-1.rockspec
+```
+
+- [ ] **Step 9: Commit**
 
 ```bash
 git add -A

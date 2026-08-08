@@ -2,8 +2,9 @@
 --
 -- Without this, every file in the project reports false positives: the reader
 -- and filters legitimately read and define globals that pandoc supplies, and
--- the specs use busted's DSL. CodeRabbit runs luacheck on pull requests, so an
--- unconfigured run would bury real findings under noise.
+-- the specs use busted's DSL. luacheck runs as a pre-commit hook, so `just lint`
+-- and every commit enforce it, and CI runs the same gate; CodeRabbit checks it
+-- again on pull requests. An unconfigured run would bury real findings in noise.
 
 std = "lua54"
 

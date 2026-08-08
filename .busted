@@ -1,0 +1,12 @@
+-- busted configuration.
+--
+-- Declares the spec root and the module search path so `require("src.markua.…")`
+-- resolves without each spec knowing how it was invoked. `just unit` is the
+-- supported entry point and already runs from the justfile's directory, so this
+-- makes a bare `busted` from the repo root behave identically.
+return {
+  default = {
+    ROOT = { "test" },
+    lpath = "./?.lua;./?/init.lua",
+  },
+}
