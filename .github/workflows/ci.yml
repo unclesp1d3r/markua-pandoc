@@ -29,11 +29,17 @@ jobs:
         lua-version: ["5.4", "5.5"]
 
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # mise provisions the pinned dev tools (bun, etc.) from mise.toml.
+      # install + cache keep CI in lockstep with local dev.
+      - name: Set up mise tools
+        uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4.2.3
         with:
-          # Later steps run repository-controlled commands (just, test/*.sh).
-          # Do not leave a usable token in the git config for them.
-          persist-credentials: false
+          install: true
+          cache: true
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Lua ${{ matrix.lua-version }}
         uses: leafo/gh-actions-lua@v13
@@ -59,10 +65,12 @@ jobs:
           pandoc --version | head -1
           just --version
 
-      # The suite arrives incrementally: justfile in Task 1, test/golden.sh in
-      # Task 9, test/filters.sh in Task 10, test/cli.sh in Task 12. Gate each
-      # phase on its own assets, so an intermediate PR is not failed by a recipe
-      # whose script does not exist yet, and say out loud what was skipped.
+      # The suite arrives incrementally: the justfile and test/ in Task 1,
+      # test/golden.sh in Task 9, test/filters.sh in Task 10, test/cli.sh in
+      # Task 12. Gate each phase on its own assets, so an intermediate PR is not
+      # failed by a recipe whose script does not exist yet, and say out loud what
+      # was skipped. `unit` needs test/ as well as the runner: busted against a
+      # missing directory is either an error or a meaninglessly green run.
       - name: Detect available test assets
         id: assets
         run: |
@@ -74,23 +82,24 @@ jobs:
               echo "::notice title=Phase unavailable::$2 not present; the '$1' phase was skipped. See docs/plan.md."
             fi
           }
-          detect unit    justfile
+          detect runner  justfile
+          detect unit    test
           detect golden  test/golden.sh
           detect filters test/filters.sh
           detect cli     test/cli.sh
 
       - name: Unit tests (busted)
-        if: steps.assets.outputs.unit == 'true'
+        if: steps.assets.outputs.runner == 'true' && steps.assets.outputs.unit == 'true'
         run: just unit
 
       - name: Golden-file tests
-        if: steps.assets.outputs.unit == 'true' && steps.assets.outputs.golden == 'true'
+        if: steps.assets.outputs.runner == 'true' && steps.assets.outputs.golden == 'true'
         run: just golden
 
       - name: Filter integration tests
-        if: steps.assets.outputs.unit == 'true' && steps.assets.outputs.filters == 'true'
+        if: steps.assets.outputs.runner == 'true' && steps.assets.outputs.filters == 'true'
         run: just filters
 
       - name: CLI tests
-        if: steps.assets.outputs.unit == 'true' && steps.assets.outputs.cli == 'true'
+        if: steps.assets.outputs.runner == 'true' && steps.assets.outputs.cli == 'true'
         run: just cli

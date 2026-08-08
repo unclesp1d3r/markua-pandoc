@@ -153,14 +153,18 @@ return M
 Run: `busted test/errors_spec.lua`
 Expected: PASS, 2 successes
 
-- [ ] **Step 7: Add the justfile**
+- [x] **Step 7: Add the justfile** — already in the repo
 
-Create `justfile`. Define only the recipes whose scripts exist — `golden`,
-`filters` and `cli` are added by Tasks 9, 10 and 12 as their scripts land, so
-that `just test` never invokes a script that is not there yet.
+`justfile` was created during repo bootstrap and is reproduced here for
+reference. It defines only the recipes whose scripts exist; `golden`, `filters`
+and `cli` are added by Tasks 9, 10 and 12 as their scripts land, so that
+`just test` never invokes a script that is not there yet.
+
+Note that `just` uses the **last** comment line above a recipe as its
+description, so each doc comment is a single self-contained line.
 
 ```just
-# Running `just` with no arguments lists the available recipes.
+# List the available recipes.
 default:
     @just --list
 
@@ -170,6 +174,14 @@ test: unit
 # busted unit specs. Fast; run these constantly.
 unit:
     busted test/
+
+# Install dev dependencies (busted is a luarocks package, not a mise tool).
+install:
+    luarocks install --local busted
+
+# Every pre-commit hook, across all files rather than just the staged ones.
+lint:
+    pre-commit run --all-files
 
 clean:
     rm -rf build
