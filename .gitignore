@@ -67,3 +67,9 @@ build/
 # Lua toolchain
 .luarocks/
 lua_modules/
+
+# Environment files (mise.toml loads .env and .env.local). Never commit these:
+# relying on a contributor's global gitignore is not a control.
+.env
+.env.*
+!.env.example
