@@ -8,21 +8,19 @@ local errors = require("src.markua.errors")
 -- errors.warn writes straight to io.stderr, so swapping the handle is the only
 -- way to assert the Lenient path actually warned rather than silently returning.
 -- Restores the real handle before returning so a failure cannot leak the stub.
--- luacheck: push ignore 122
-local function capture_stderr(fn)
-  local real, chunks = io.stderr, {}
-  io.stderr = {
+-- errors.warn takes an optional sink, so the Lenient path's output can be
+-- asserted without swapping the global io.stderr out from under the suite.
+local function recording_sink()
+  local chunks = {}
+  return {
     write = function(_, ...)
       for _, piece in ipairs({ ... }) do
         chunks[#chunks + 1] = piece
       end
     end,
+    text = function() return table.concat(chunks) end,
   }
-  local ok, result = pcall(fn)
-  io.stderr = real
-  return ok, result, table.concat(chunks)
 end
--- luacheck: pop
 
 describe("errors", function()
   it("renders file and line in the message", function()
@@ -50,14 +48,12 @@ describe("errors", function()
 
   it("downgrades to a warning when not strict", function()
     -- Without this path cfg.strict is dead config and --lenient does nothing.
-    -- Asserting the stderr text is what proves the warning fired; checking the
+    -- Asserting the written text is what proves the warning fired; checking the
     -- return value alone still passes when the warn call is deleted outright.
-    local ok, result, written = capture_stderr(function()
-      return errors.report({ strict = false }, "a.md", 1, "boom")
-    end)
-    assert.is_true(ok)
+    local sink = recording_sink()
+    local result = errors.report({ strict = false, sink = sink }, "a.md", 1, "boom")
     assert.is_false(result)
-    assert.equals("warning: a.md:1: boom\n", written)
+    assert.equals("warning: a.md:1: boom\n", sink.text())
   end)
 
   it("treats an absent or empty config as strict", function()

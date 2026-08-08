@@ -41,7 +41,7 @@ Every later module in this reader reports unknown constructs by file and line. W
 - R1. `errors.new(file, line, message)` returns a table carrying `file`, `line`, and `message`.
 - R2. `tostring()` on that table renders `file:line: message`. It coerces each field, so a nil or non-integer `line` renders literally instead of raising from inside the metamethod.
 - R3. `errors.raise(file, line, message)` raises the table itself, so `pcall` yields an inspectable table rather than a string to parse.
-- R4. `errors.warn(file, line, message)` writes the rendered message to stderr and returns without aborting.
+- R4. `errors.warn(file, line, message, sink)` writes the rendered message and returns without aborting. `sink` defaults to stderr; passing one makes the output assertable.
 - R5. `errors.report(cfg, file, line, message)` raises in Strict mode and warns, returning `false`, in Lenient mode. Strict is the default: `cfg` absent, or present without `strict = false`, raises.
 - R6. The module is pure Lua and never references the `pandoc` global.
 
@@ -76,6 +76,7 @@ Every later module in this reader reports unknown constructs by file and line. W
 - KTD5. **Use `--only-deps`, not its `--deps-only` alias.** `--only-deps` has existed since luarocks 2.2.2; `--deps-only` was added as an alias only in 3.4.0. The canonical spelling costs nothing and does not depend on the alias surviving.
 - KTD6. **`build.type = "none"`.** The documented null build back-end. Under `--only-deps` luarocks returns straight after dependency resolution and never inspects `build`, so this only matters as a guard: a stray plain `luarocks make` becomes an intentional no-op instead of `builtin`'s module auto-discovery.
 - KTD7. **Create only the directories that receive files in this task.** `docs/plan.md` Step 1 creates `src/markua`, `src/filters`, `bin`, and `test/golden`. Git does not track empty directories, so three of those four would not survive a clone. Create `src/markua/` and `test/` only; Tasks 9-12 create theirs alongside their first file.
+- KTD9. **`warn` takes an optional sink.** Hardcoding `io.stderr` left R4's "writes the rendered message" unassertable without swapping a global, and a mutation test proved the Lenient-path scenario passed with the `warn` call deleted entirely. An optional trailing parameter keeps KTD2's four-function surface intact, removes the monkeypatch and its luacheck suppression from the spec, and is the seam a later caller would use to batch or cap a noisy full-book run. Governs R4.
 - KTD8. **`__tostring` coerces with `%s`, not `%d`.** `docs/plan.md:147-149` uses `string.format("%s:%d: %s", ...)`. Verified in Lua 5.4: a nil `line` raises `bad argument #3 to 'string.format' (number expected, got nil)` and a float raises `number has no integer representation` — a secondary error thrown from inside the metamethod, which masks the original message rather than reporting it. Task 12's CLI-level errors (unreadable input file, unsupported output format) have no natural line number, so nil is a real input rather than a hypothetical. Use `%s` with `tostring()` on each field. `tostring(42)` is `"42"`, so R2's rendering is byte-identical for well-formed input. Governs R2.
 
 ### Strict and Lenient resolution
@@ -98,14 +99,14 @@ Strict is the default in three of the four shapes, matching the posture
 
 ### Assumptions
 
-- busted is invoked from the repo root. No `.busted` config exists, so `require("src.markua.errors")` resolves through stock `package.path`. Running busted from a subdirectory would break every `src.*` require. Not worth a config file yet, but it is an implicit dependency rather than an enforced one.
+- `.busted` declares the spec root and module search path, so the contract is stated rather than implied. `just unit` runs from the justfile's directory and therefore works from any subdirectory; a bare `busted <path>` invoked from elsewhere is not a supported entry point.
 - `lua >= 5.4` in `dependencies` is satisfied by the running interpreter — luarocks injects `lua` as a virtual provided rock from `cfg.lua_version` and never attempts to install it.
 - Repeat CI runs are safe. `--only-deps` never registers the rock as installed, so the "already installed, use --force" short-circuit cannot fire on a second run.
-- Unverified: luarocks' behavior against a mise-managed Lua is not documented anywhere official. Local luarocks 3.13.0 resolves against mise's Lua 5.4.8 correctly; U3's verification is the check that this holds.
+- Confirmed on CI, not just locally: on a clean runner with busted genuinely absent, luarocks resolved it and its transitive dependencies from the rockspec against mise's Lua 5.4.8, reporting `lua >= 5.1 (5.4-1 provided by VM: success)`.
 
 ### Risks
 
-- CI calls `luarocks path --lr-bin` without `--local` while installing with `--local`. It resolves correctly today. U3 changes the install command in that same step, so leave the PATH line untouched and confirm CI still finds `busted`.
+- CI calls `luarocks path --lr-bin` without `--local` while installing with `--local`. Confirmed working end-to-end on a clean runner: the install resolved busted from the rockspec and `busted test/` then ran and passed. The PATH line is unchanged and must stay that way -- `--lr-bin` is colon-joined while `$GITHUB_PATH` takes one entry per line.
 - `just lint` does not run luacheck. `.pre-commit-config.yaml` has no luacheck hook — luacheck runs on pull requests via CodeRabbit (`.luacheckrc:5`, `.coderabbit.yml`). Treat `just lint` as a formatting and workflow gate, and run luacheck directly to check the Lua.
 
 ---

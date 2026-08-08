@@ -32,8 +32,11 @@ end
 
 --- Report without aborting. Used only when config.strict is false, so the
 --- documented --lenient flag downgrades hard errors instead of being inert.
-function M.warn(file, line, message)
-  io.stderr:write("warning: ", tostring(M.new(file, line, message)), "\n")
+--- `sink` defaults to stderr; passing one makes the output assertable, and is
+--- the seam a later caller would use to batch or cap a noisy full-book run.
+function M.warn(file, line, message, sink)
+  local out = sink or io.stderr
+  out:write("warning: ", tostring(M.new(file, line, message)), "\n")
 end
 
 --- Raise when strict, warn otherwise. Every unknown-construct path goes
@@ -44,7 +47,7 @@ function M.report(cfg, file, line, message)
   -- inside this module, masking the very error it was called to report.
   -- Strict is the default for every shape except an explicit strict = false.
   if type(cfg) == "table" and cfg.strict == false then
-    M.warn(file, line, message)
+    M.warn(file, line, message, cfg.sink)
     return false
   end
   M.raise(file, line, message)

@@ -107,13 +107,32 @@ busted --version
 
 - [ ] **Step 3: Write the failing test**
 
-Create `test/errors_spec.lua`. The block below is the original four-scenario
-sketch; review added four more (non-table and empty `cfg`, a non-integer line,
-and a stderr assertion on the Lenient path). `test/errors_spec.lua` in the repo
-is authoritative:
+Create `test/errors_spec.lua` (this is the shipped file, verbatim):
 
 ```lua
+-- Spec for the structured error type (src/markua/errors.lua).
+--
+-- Written before the module exists: Task 1's TDD cycle starts red. Run with
+-- `busted test/errors_spec.lua` from the repo root -- require("src.markua.errors")
+-- resolves through stock package.path only from there.
 local errors = require("src.markua.errors")
+
+-- errors.warn writes straight to io.stderr, so swapping the handle is the only
+-- way to assert the Lenient path actually warned rather than silently returning.
+-- Restores the real handle before returning so a failure cannot leak the stub.
+-- errors.warn takes an optional sink, so the Lenient path's output can be
+-- asserted without swapping the global io.stderr out from under the suite.
+local function recording_sink()
+  local chunks = {}
+  return {
+    write = function(_, ...)
+      for _, piece in ipairs({ ... }) do
+        chunks[#chunks + 1] = piece
+      end
+    end,
+    text = function() return table.concat(chunks) end,
+  }
+end
 
 describe("errors", function()
   it("renders file and line in the message", function()
@@ -124,21 +143,55 @@ describe("errors", function()
   it("raises a structured error rather than a string", function()
     local ok, err = pcall(errors.raise, "a.md", 7, "boom")
     assert.is_false(ok)
-    assert.equals(7, err.line)
     assert.equals("a.md", err.file)
+    assert.equals(7, err.line)
     assert.equals("boom", err.message)
   end)
 
   it("reports fatally when strict", function()
-    local ok = pcall(errors.report, { strict = true }, "a.md", 1, "boom")
+    -- Assert the raised value, not just that something raised: report must
+    -- surface the structured error, not a bare string.
+    local ok, err = pcall(errors.report, { strict = true }, "a.md", 1, "boom")
     assert.is_false(ok)
+    assert.equals("a.md", err.file)
+    assert.equals(1, err.line)
+    assert.equals("boom", err.message)
   end)
 
   it("downgrades to a warning when not strict", function()
     -- Without this path cfg.strict is dead config and --lenient does nothing.
-    local ok, result = pcall(errors.report, { strict = false }, "a.md", 1, "boom")
-    assert.is_true(ok)
+    -- Asserting the written text is what proves the warning fired; checking the
+    -- return value alone still passes when the warn call is deleted outright.
+    local sink = recording_sink()
+    local result = errors.report({ strict = false, sink = sink }, "a.md", 1, "boom")
     assert.is_false(result)
+    assert.equals("warning: a.md:1: boom\n", sink.text())
+  end)
+
+  it("treats an absent or empty config as strict", function()
+    assert.is_false((pcall(errors.report, nil, "a.md", 1, "boom")))
+    assert.is_false((pcall(errors.report, {}, "a.md", 1, "boom")))
+  end)
+
+  it("treats a non-table config as strict rather than raising a raw index error", function()
+    -- A scalar cfg used to reach `cfg.strict` and raise "attempt to index a
+    -- number value" from inside this module, masking the real error.
+    local ok, err = pcall(errors.report, 5, "a.md", 1, "boom")
+    assert.is_false(ok)
+    assert.equals("boom", err.message)
+  end)
+
+  it("renders a nil line literally instead of raising from __tostring", function()
+    -- string.format("%s:%d: %s", ...) raises on a nil line (bad argument #3),
+    -- masking the real error. %s with tostring() on each field must not crash.
+    local err = errors.new("a.md", nil, "boom")
+    assert.equals("a.md:nil: boom", tostring(err))
+  end)
+
+  it("renders a non-integer line literally instead of raising from __tostring", function()
+    -- The other half of the %d hazard: %d rejects a float outright with
+    -- "number has no integer representation".
+    assert.equals("a.md:3.5: boom", tostring(errors.new("a.md", 3.5, "boom")))
   end)
 end)
 ```
@@ -153,34 +206,56 @@ Expected: FAIL with "module 'src.markua.errors' not found"
 Create `src/markua/errors.lua`:
 
 ```lua
---- Structured errors carrying source position.
+-- Structured errors carrying source position.
+--
+-- Every later module in this reader reports unknown constructs by file and
+-- line. A shared error type lets callers inspect `.file` / `.line` directly
+-- instead of parsing a rendered string back apart, and gives the documented
+-- --lenient flag a single place (report) where the Strict/Lenient choice is
+-- made.
 local M = {}
 
 local mt = {
+  -- %s with tostring() on every field, not %d (docs/plan.md's original
+  -- string.format("%s:%d: %s", ...)): %d raises on a nil or non-integer
+  -- line, and that secondary error inside __tostring would mask the real
+  -- one. CLI-level errors (Task 12) have no natural line number, so nil is
+  -- a real input, not a hypothetical.
   __tostring = function(e)
     return string.format("%s:%s: %s", tostring(e.file), tostring(e.line), tostring(e.message))
   end,
 }
 
+--- Construct a structured error carrying source position.
 function M.new(file, line, message)
   return setmetatable({ file = file, line = line, message = message }, mt)
 end
 
+--- Raise the table itself so callers can inspect .file / .line.
 function M.raise(file, line, message)
+  -- Level 0: Lua prepends position info only to string errors, and this
+  -- table already carries its own file/line.
   error(M.new(file, line, message), 0)
 end
 
 --- Report without aborting. Used only when config.strict is false, so the
 --- documented --lenient flag downgrades hard errors instead of being inert.
-function M.warn(file, line, message)
-  io.stderr:write("warning: " .. tostring(M.new(file, line, message)) .. "\n")
+--- `sink` defaults to stderr; passing one makes the output assertable, and is
+--- the seam a later caller would use to batch or cap a noisy full-book run.
+function M.warn(file, line, message, sink)
+  local out = sink or io.stderr
+  out:write("warning: ", tostring(M.new(file, line, message)), "\n")
 end
 
 --- Raise when strict, warn otherwise. Every unknown-construct path goes
 --- through here so leniency is one decision rather than scattered branches.
 function M.report(cfg, file, line, message)
+  -- The type check is load-bearing: a nil cfg would raise a nil-index error
+  -- and a scalar one ("attempt to index a number value") would raise from
+  -- inside this module, masking the very error it was called to report.
+  -- Strict is the default for every shape except an explicit strict = false.
   if type(cfg) == "table" and cfg.strict == false then
-    M.warn(file, line, message)
+    M.warn(file, line, message, cfg.sink)
     return false
   end
   M.raise(file, line, message)
@@ -261,7 +336,9 @@ description = {
 -- declaring the floor keeps `luarocks install --only-deps` honest about it.
 dependencies = {
   "lua >= 5.4",
-  "busted",
+  -- Pinned to a floor rather than left open: an unconstrained dependency lets a
+  -- clean CI run resolve a newer busted than any commit chose.
+  "busted >= 2.2, < 3.0",
 }
 
 -- Nothing to build: the reader is a pandoc script, not an installable module.
