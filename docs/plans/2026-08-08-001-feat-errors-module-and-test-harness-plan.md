@@ -80,13 +80,15 @@ Every later module in this reader reports unknown constructs by file and line. W
 
 ### Strict and Lenient resolution
 
-`report` collapses four `cfg` shapes into two behaviors. The `cfg and` guard is
-load-bearing: without it, a nil `cfg` raises a nil-index error instead of taking
-the Strict path.
+`report` collapses every `cfg` shape into two behaviors. The `type(cfg) == "table"`
+check is load-bearing: a nil `cfg` would raise a nil-index error and a scalar one
+would raise `attempt to index a number value` — from inside the module, masking
+the error it was called to report.
 
 | `cfg` argument | `cfg.strict` | Mode | Behavior |
 | --- | --- | --- | --- |
 | absent / `nil` | n/a | Strict | Raises |
+| a scalar (e.g. `5`, `true`) | n/a | Strict | Raises |
 | `{}` | `nil` | Strict | Raises |
 | `{ strict = true }` | `true` | Strict | Raises |
 | `{ strict = false }` | `false` | Lenient | Warns, returns `false` |
@@ -158,15 +160,15 @@ Strict is the default in three of the four shapes, matching the posture
 - `src/markua/errors.lua` (create)
 - `test/errors_spec.lua` (run, unchanged)
 
-**Approach:** Implement per `docs/plan.md:144-183` — a module table, one shared metatable carrying `__tostring`, and the four functions. `report` branches on `cfg and cfg.strict == false` so that a nil `cfg` and a `cfg` without `strict` both take the Strict path, which is the default posture named in `CONCEPTS.md`.
+**Approach:** Implement per `docs/plan.md:144-183` — a module table, one shared metatable carrying `__tostring`, and the four functions. `report` branches on `type(cfg) == "table" and cfg.strict == false` so that a nil, empty, or scalar `cfg` all take the Strict path, which is the default posture named in `CONCEPTS.md`.
 
 **Patterns to follow:** `.luacheckrc:16` declares no globals for `src/markua/*.lua` on purpose, so any `pandoc` reference is reported. The module uses only `setmetatable`, `string.format`, `error`, and `io.stderr:write` — all stock `lua54`.
 
-**Test scenarios:** The five from U1 now pass. Note for the implementer: scenario 4 exercises the Lenient path, which calls `warn`, which really does write a line to stderr. That line appearing in busted's output is expected, not a failure.
+**Test scenarios:** The eight from U1 now pass. Scenario 4 asserts the exact text `warn` writes by swapping `io.stderr` for the duration of the call, so the Lenient path is proven to warn rather than merely to return `false`.
 
 **Verification:**
 
-- `busted test/errors_spec.lua` reports 5 successes, 0 failures.
+- `busted test/errors_spec.lua` reports 8 successes, 0 failures.
 - `luacheck src/markua/errors.lua test/errors_spec.lua` reports zero warnings.
 
 ---
@@ -201,7 +203,7 @@ Strict is the default in three of the four shapes, matching the posture
 
 - `luarocks install --local --only-deps markua-pandoc-dev-1.rockspec` exits 0.
 - `just install` exits 0 and resolves busted.
-- `just unit` still reports 5 successes, proving busted is still reachable after the rewiring.
+- `just unit` still reports 8 successes, proving busted is still reachable after the rewiring.
 - Searching `justfile` and `.github/workflows/ci.yml` for `busted` finds it named as a dependency only in the rockspec.
 - `just lint` passes, including actionlint on the modified workflow and markdownlint on the modified `docs/plan.md`.
 - `just` with no arguments lists the recipes and none reference a script that does not exist.
@@ -213,7 +215,7 @@ Strict is the default in three of the four shapes, matching the posture
 | Gate | Command | Applies to | Done signal |
 | --- | --- | --- | --- |
 | Unit specs (red) | `busted test/errors_spec.lua` | U1 | Non-zero exit naming `module 'src.markua.errors' not found` |
-| Unit specs (green) | `just unit` | U2, U3 | 5 successes, 0 failures |
+| Unit specs (green) | `just unit` | U2, U3 | 8 successes, 0 failures |
 | Lua lint | `luacheck src/markua/errors.lua test/errors_spec.lua` | U2 | Zero warnings. Run directly — `just lint` does not include luacheck |
 | Repo hooks | `just lint` | U3 | actionlint, check-yaml, markdownlint, whitespace and EOF hooks all pass |
 | Dependency install | `just install` | U3 | Exit 0 |
@@ -235,5 +237,5 @@ Strict is the default in three of the four shapes, matching the posture
 ### Per unit
 
 - U1 — the spec exists and was observed failing for the module-not-found reason specifically.
-- U2 — `errors.lua` exists, the five scenarios pass, luacheck is clean.
+- U2 — `errors.lua` exists, the eight scenarios pass, luacheck is clean.
 - U3 — the rockspec exists, `justfile` and `ci.yml` both read from it, the `$GITHUB_PATH` line is unchanged, and `docs/plan.md` no longer says `--deps-only`.

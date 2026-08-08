@@ -103,7 +103,10 @@ busted --version
 
 - [ ] **Step 3: Write the failing test**
 
-Create `test/errors_spec.lua`:
+Create `test/errors_spec.lua`. The block below is the original four-scenario
+sketch; review added four more (non-table and empty `cfg`, a non-integer line,
+and a stderr assertion on the Lenient path). `test/errors_spec.lua` in the repo
+is authoritative:
 
 ```lua
 local errors = require("src.markua.errors")
@@ -151,7 +154,7 @@ local M = {}
 
 local mt = {
   __tostring = function(e)
-    return string.format("%s:%d: %s", e.file, e.line, e.message)
+    return string.format("%s:%s: %s", tostring(e.file), tostring(e.line), tostring(e.message))
   end,
 }
 
@@ -172,7 +175,7 @@ end
 --- Raise when strict, warn otherwise. Every unknown-construct path goes
 --- through here so leniency is one decision rather than scattered branches.
 function M.report(cfg, file, line, message)
-  if cfg and cfg.strict == false then
+  if type(cfg) == "table" and cfg.strict == false then
     M.warn(file, line, message)
     return false
   end
@@ -185,7 +188,7 @@ return M
 - [ ] **Step 6: Run the tests and make sure they pass**
 
 Run: `busted test/errors_spec.lua`
-Expected: PASS, 4 successes
+Expected: PASS, 8 successes
 
 - [x] **Step 7: Add the justfile** — already in the repo
 
