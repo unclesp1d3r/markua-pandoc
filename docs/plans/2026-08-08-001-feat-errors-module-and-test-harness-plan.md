@@ -135,13 +135,16 @@ Strict is the default in three of the four shapes, matching the posture
 
 **Execution note:** This unit is done when the spec fails with the module-not-found message. A failure with any other message means the spec is broken, not the missing module — fix the spec before moving on.
 
-**Test scenarios:** The spec is this unit's artifact. It defines five:
+**Test scenarios:** The spec is this unit's artifact. It defines eight:
 
 1. `errors.new("chapter-01.md", 42, "unknown attribute")` — `tostring` renders exactly `chapter-01.md:42: unknown attribute`.
 2. `pcall(errors.raise, "a.md", 7, "boom")` — returns `false`, and the error value is a table with `.file == "a.md"`, `.line == 7`, `.message == "boom"`. Assert on the table fields, not on a rendered string; this is what distinguishes a structured raise from a string one.
-3. `pcall(errors.report, { strict = true }, "a.md", 1, "boom")` — returns `false`, meaning it raised.
-4. `pcall(errors.report, { strict = false }, "a.md", 1, "boom")` — returns `true`, and the returned value is `false`.
+3. `pcall(errors.report, { strict = true }, "a.md", 1, "boom")` — returns `false`, and the raised value is the structured error, not a bare string.
+4. `pcall(errors.report, { strict = false }, "a.md", 1, "boom")` — returns `true`, the returned value is `false`, and the exact text `warn` wrote to stderr is asserted.
 5. `tostring(errors.new("a.md", nil, "boom"))` — renders `a.md:nil: boom` rather than raising. Per KTD8 this is the guard against a `%d` format crash masking the real error.
+6. `tostring(errors.new("a.md", 3.5, "boom"))` — renders `a.md:3.5: boom`. The other half of the `%d` hazard, which rejects a float with `number has no integer representation`.
+7. `pcall(errors.report, nil, ...)` and `pcall(errors.report, {}, ...)` — both raise. Strict is the default for an absent or empty config.
+8. `pcall(errors.report, 5, ...)` — raises the structured error, not `attempt to index a number value`. A scalar config must not fault inside the module.
 
 **Verification:** `busted test/errors_spec.lua` exits non-zero and names `module 'src.markua.errors' not found`.
 

@@ -83,8 +83,12 @@ this is only the source tree. Do **not** recreate `.gitignore`: the committed
 one is considerably more than these five lines, and it carries a `!bin/`
 re-include that a wider global gitignore would otherwise defeat.
 
+Create only the directories this task puts files in. Git does not track empty
+directories, so `src/filters`, `bin` and `test/golden` would not survive a
+clone; Tasks 9 through 12 create them alongside their first file.
+
 ```bash
-mkdir -p src/markua src/filters bin test/golden
+mkdir -p src/markua test
 ```
 
 - [ ] **Step 2: Install the Lua toolchain**
