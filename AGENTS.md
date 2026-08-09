@@ -38,7 +38,10 @@ manuscripts.
   module that knows about fences; everything else consumes its output.
 - **Unknown constructs are hard errors.** An unrecognized `{...}` attribute line must
   abort with file and line number, never pass through as literal braces into the
-  output. A `--lenient` flag may downgrade this to a warning.
+  output. `bin/markua --lenient` downgrades this to a warning, passed through the
+  environment because pandoc's `ReaderOptions` rejects unknown fields. This rule is
+  about unrecognized *input*: a body line that collides with a delimiter the reader
+  itself generates is escaped, not rejected, matching pandoc's own markdown writer.
 - **Lua patterns, not regex.** Lua has no alternation, no lookahead, and no non-greedy
   `+`. Multi-alternative matching is done with explicit loops over a table of patterns.
 - **Target Markua 0.30.** Quizzes and exercises (the Markua 0.10 course constructs) are
@@ -46,7 +49,13 @@ manuscripts.
 - **Blurb/aside classes are configurable, not hardcoded.** The documented set is
   `warning`, `tip`, `note`, `information`, `error`, `question`, `discussion`,
   `exercise` — but real Leanpub builds reject `note`, and books restrict the set
-  further. Ship the documented list as a default that config can override.
+  further. Ship the documented list as a default that a `--config <file>` overrides
+  file can narrow.
+
+Further load-bearing decisions verified against pandoc's own source and behavior — AST
+shapes the reader emits, class ordering a writer pattern-matches on, delimiter handling
+— live in [`docs/solutions/`](docs/solutions/) rather than being restated here. Read
+them before changing what the reader emits or what a filter consumes.
 
 ## Syntax variants that must both work
 

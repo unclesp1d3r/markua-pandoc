@@ -39,9 +39,13 @@ it:
 package = "markua-pandoc"
 version = "dev-1"
 source = { url = "git+https://github.com/unclesp1d3r/markua-pandoc.git" }
-dependencies = { "lua >= 5.4", "busted >= 2.2, < 3.0" }
+dependencies = { "lua >= 5.4", "busted >= 2.2, < 3.0", "luacheck >= 1.2, < 2.0" }
 build = { type = "none" }
 ```
+
+The pattern generalized: `luacheck` joined the same rockspec for the same reason —
+a luarocks-only dev tool `mise.toml` cannot pin, which would otherwise be named in
+both the justfile and the CI workflow.
 
 `just install` runs `luarocks install --local --only-deps markua-pandoc-dev-1.rockspec`,
 and CI's install step runs `just install`. The tool's name and version live in one
@@ -51,7 +55,8 @@ file.
 
 - **`--only-deps`, not `--deps-only`.** Both work on luarocks 3.x, but `--only-deps`
   has existed since 2.2.2 while the alias only arrived in 3.4.0. Verified in
-  `src/luarocks/cmd/build.lua`, which declares `cmd:flag("--only-deps --deps-only")`.
+  luarocks' own source (`src/luarocks/cmd/build.lua` in the luarocks repository,
+  not this one), which declares `cmd:flag("--only-deps --deps-only")`.
 - **`build.type = "none"`.** The documented null build back-end. `build_rockspec()`
   checks and initializes `rockspec.build` and `rockspec.build.type` *before* it
   processes dependencies -- an absent type is defaulted to `"builtin"` there. Under
