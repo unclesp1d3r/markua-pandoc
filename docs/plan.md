@@ -2,7 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build `markua-pandoc`, a pandoc custom reader that parses Markua 0.30 (minus quizzes and exercises) so any Leanpub book can be converted to DOCX, EPUB, LaTeX, ICML, or HTML in one command, preserving index entries and resource attributes that a markdown-to-markdown pipeline structurally cannot carry.
+**Goal:** Build `markua-pandoc`, a pandoc custom reader that parses Markua 0.30 (minus quizzes and exercises) so a Leanpub manuscript file can be converted to DOCX, EPUB, LaTeX, ICML, or HTML in one command, preserving index entries and resource attributes that a markdown-to-markdown pipeline structurally cannot carry.
+
+The unit of work in v1 is **one manuscript file per invocation**. `Book.txt` ordering and multi-file assembly stay the caller's job (see "Out of scope for v1"), so a whole book is a loop over `markua`, not a single call. Index lowering ships Word-first; see the open question on the other four writers.
 
 **Architecture:** A *delegating* reader. Markua-only syntax is rewritten in pure Lua into pandoc-flavored markdown (fenced divs, bracketed spans, `$$` math), then handed to `pandoc.read` so pandoc's own parser handles all the CommonMark-shaped work. A second layer of Lua filters turns the resulting AST annotations into output-format-specific constructs (Word `XE` index fields, named paragraph styles). A native from-scratch Markua parser is explicitly out of scope: it would mean reimplementing CommonMark in Lua, which is months of work and worse than pandoc's parser.
 
@@ -14,11 +16,69 @@
 - **Pandoc 3.10 or newer.** The custom reader API and GitHub-alert parsing both depend on it.
 - **No `pandoc` module outside `src/markua.lua` and `src/filters/*.lua`.** busted runs under system Lua, where the `pandoc` global does not exist. Every module under `src/markua/` must be pure Lua and unit-testable without pandoc. This is the single most important structural rule in the plan.
 - **Fence-awareness is mandatory in every transform.** Content inside fenced code blocks is never Markua. Real manuscripts contain JSON code blocks whose lines begin with `{`, which a naive attribute-list match will corrupt.
-- **Unknown constructs are hard errors.** An unrecognized `{...}` attribute line must abort with file and line number, never pass through as literal braces into the output. A `--lenient` flag may downgrade this to a warning.
+- **Unknown constructs are hard errors.** An unrecognized `{...}` attribute line must abort with file and line number, never pass through as literal braces into the output. `bin/markua --lenient` downgrades this to a warning. Because pandoc's `ReaderOptions` rejects unknown fields, the wrapper passes the flag to the reader through `MARKUA_LENIENT` in the environment rather than through `opts`.
 - **Lua patterns, not regex.** Lua has no alternation, no lookahead, and no non-greedy `+`. Multi-alternative matching is done with explicit loops over a table of patterns.
 - **Two index syntaxes.** `{ix: "term"}` is the Markua spec form and is canonical. `{i: "term"}` is a widespread real-world variant and must also be accepted. `!` creates hierarchy in both (`{ix: "Trees!B-tree"}`).
 - **Two blurb syntaxes.** `{class: tip}` on the line above a run of `B>` lines is the spec form. `{blurb, class: tip}` ... `{/blurb}` is the fenced form Leanpub also accepts. Both must work.
-- **Blurb/aside classes are configurable, not hardcoded.** The documented set is `warning`, `tip`, `note`, `information`, `error`, `question`, `discussion`, `exercise`, but real Leanpub builds reject `note`, and books restrict the set further. Ship the documented list as a default that a config file can override.
+- **Blurb/aside classes are configurable, not hardcoded.** The documented set is `warning`, `tip`, `note`, `information`, `error`, `question`, `discussion`, `exercise`, but real Leanpub builds reject `note`, and books restrict the set further. Ship the documented list as a default that a config file can override. The override is a Lua table returned by a file passed to `bin/markua --config`, loaded in a sandboxed environment and merged over the defaults (Task 4 and Task 9).
+
+---
+
+## Key Technical Decisions
+
+Settled in review on 2026-08-08. Each was checked against pandoc's own source
+and behavior rather than chosen on taste, so the rationale names what was
+verified.
+
+- **Index spans use pandoc's own shape: class `indexref`, attribute `entry`.**
+  This is what pandoc's Docx reader emits when it parses a Word `XE` field, so
+  `markua -> docx -> pandoc` returns the identical span. That round trip is the
+  golden-test oracle, replacing a grep for `XE "` that would pass on a field
+  containing the wrong text. *(Rejected: the `.index` + `term` shape from the
+  AsciiDoc reader, and DocBook's structured `primary`/`secondary`, both of
+  which lose the round trip.)*
+
+- **The callout class is the head of the class list, `.blurb` follows it.**
+  pandoc's DocBook writer matches only the first class, so `{.blurb .tip}`
+  degrades to a bare `<para>` with no error anywhere while `{.tip .blurb}`
+  becomes a real `<tip>`. This head-class shape is also what pandoc's DocBook
+  and GitHub-alert readers produce, so one downstream filter serves callouts
+  from any of the three sources. The order is pinned by a test.
+
+- **Index lowering ships for Word, LaTeX, and DocBook; HTML and EPUB need no
+  filter.** pandoc's HTML writer renders unknown span attributes as `data-`
+  attributes, so an index span already arrives as
+  `<span class="indexref" data-entry="B-tree">`. LaTeX is nearly free because
+  `!` is its subentry separator too, so hierarchy needs no translation; Word
+  needs `!` mapped to `:`; DocBook needs the levels split into nested elements.
+  *(ICML has no index primitive and is documented as unsupported.)*
+
+- **The LaTeX filter injects `makeidx` into `header-includes`.** A bare
+  `\index{}` compiles silently and prints nothing, which is exactly the
+  ship-a-book-with-no-index failure this project exists to prevent. Where the
+  index prints stays the author's call, so `\printindex` is not injected.
+
+- **Colliding delimiters are escaped, not rejected.** A body line of exactly
+  `:::` or `$$` is backslash-escaped, matching what pandoc's markdown writer
+  does; the escaped form reads back to the identical AST. A hard error here
+  would refuse documents pandoc handles without complaint. *(Rejected: the
+  hard-error rule that the unknown-construct constraint would otherwise imply
+  -- that constraint is about unrecognized Markua input, not about output the
+  reader itself generates.)*
+
+- **Code and CSV-table resources are lowered in v1; video and audio are not.**
+  A manuscript whose code samples silently vanish is the worst failure this
+  tool can have, and CSV maps onto a pandoc `Table` directly. Video and audio
+  have no print target and no native pandoc node, so they stay annotated spans.
+
+- **Matter directives carry the bare word verbatim** (`frontmatter`, not
+  `front`), matching what the attribute parser already produces, so there is no
+  mapping table to drift.
+
+**Independently implemented, not ported.** Where this reader mirrors a pandoc
+behavior -- delimiter escaping, fence sizing -- the behavior was observed and
+reimplemented in Lua. pandoc is GPL and this project is Apache-2.0; conventions
+and interfaces are borrowed, source is not.
 
 ---
 
@@ -43,18 +103,37 @@ markua-pandoc/
 │   │   └── errors.lua              # MarkuaError with file:line
 │   └── filters/
 │       ├── index-xe.lua            # index spans -> Word XE fields
+│       ├── index-latex.lua         # index spans -> \index{} + makeidx preamble
+│       ├── index-docbook.lua       # index spans -> <indexterm>
+│       ├── resources.lua           # code/table resource spans -> real blocks
 │       └── callouts.lua            # blurb/aside divs -> Word styles
 └── test/
-    ├── scanner_spec.lua            # busted
+    ├── errors_spec.lua             # busted
+    ├── scanner_spec.lua
     ├── attributes_spec.lua
+    ├── config_spec.lua
     ├── blocks_spec.lua
     ├── inline_spec.lua
     ├── resources_spec.lua
     ├── golden.sh                   # pandoc integration tests
+    ├── filters.sh                  # DOCX filter integration tests
+    ├── cli.sh                      # bin/markua end-to-end test
+    ├── book.sh                     # whole-manuscript smoke test
     └── golden/
         ├── <name>.md               # Markua input
         └── <name>.native           # expected pandoc AST
 ```
+
+**Borrowed conventions.** The AST shapes this reader emits are pandoc's own,
+not invented: index points are `Span`s with class `indexref` and attribute
+`entry` (what pandoc's Docx reader produces from a Word `XE` field), and
+callouts are a `Div` whose *head* class names the callout type followed by a
+`.blurb` marker (what pandoc's DocBook and GitHub-alert readers both produce).
+Following them buys three things for free -- callouts become real DocBook
+`<tip>`/`<note>` elements, index spans survive into HTML and EPUB as
+`data-entry` with no filter at all, and `markua -> docx -> pandoc` round-trips
+to the identical span, which is a far stronger golden-test oracle than grepping
+output XML.
 
 **Responsibility boundaries.** `scanner.lua` is the only module that knows about fences, and every other block-level module consumes its output rather than re-scanning raw text. `attributes.lua` is a pure parser with no knowledge of what attributes mean. `blocks.lua` and `inline.lua` own the actual Markua-to-pandoc-markdown rewrites and are where nearly all the spec surface lives. `markua.lua` is deliberately tiny so that the untestable-under-busted surface stays near zero.
 
@@ -826,6 +905,31 @@ function M.merge(base, overrides)
   return out
 end
 
+--- Load a book-level override file: a Lua chunk returning a table.
+--
+-- Lua source rather than JSON keeps this module dependency-free and pure, so
+-- busted can exercise it under system Lua with no pandoc and no JSON library.
+-- The chunk is loaded with an empty environment, so a config file is data --
+-- it cannot reach the filesystem, the process, or `require`.
+--
+-- Returns nil plus a message on any failure; the caller decides whether that
+-- is fatal. Validating here rather than at the call site keeps the "never
+-- trust external data" boundary in one place.
+function M.load_file(path)
+  local chunk, err = loadfile(path, "t", {})
+  if not chunk then
+    return nil, "cannot load config " .. path .. ": " .. tostring(err)
+  end
+  local ok, result = pcall(chunk)
+  if not ok then
+    return nil, "error in config " .. path .. ": " .. tostring(result)
+  end
+  if type(result) ~= "table" then
+    return nil, "config " .. path .. " must return a table"
+  end
+  return result
+end
+
 function M.is_callout_class(cfg, name)
   for _, c in ipairs(cfg.callout_classes) do
     if c == name then
@@ -836,6 +940,16 @@ function M.is_callout_class(cfg, name)
 end
 
 return M
+```
+
+A config file is therefore a small Lua table, and the override path documented
+in the Global Constraints is real end to end:
+
+```lua
+-- markua.config.lua -- this book's Leanpub build rejects `note`.
+return {
+  callout_classes = { "warning", "tip", "information", "error", "discussion" },
+}
 ```
 
 - [ ] **Step 4: Run the tests and make sure they pass**
@@ -862,7 +976,7 @@ git commit -m "feat: reader config with overridable callout classes"
 **Interfaces:**
 
 - Consumes: `scanner`, `attributes`, `config`, `errors`
-- Produces: `blocks.transform(lines, cfg, file) -> array of strings`. Input is scanner records; output is pandoc-markdown lines. Blurbs and asides become fenced divs (`::: {.tip .blurb}` … `:::`), matter directives become fenced divs (`::: {.frontmatter}` … `:::` is *not* used; they emit `::: {.matter matter="front"}` self-closing markers), `{class: part}` attaches to the following heading.
+- Produces: `blocks.transform(lines, cfg, file) -> array of strings`. Input is scanner records; output is pandoc-markdown lines. Blurbs and asides become fenced divs (`::: {.tip .blurb}` … `:::`), matter directives become fenced divs (`::: {.frontmatter}` … `:::` is *not* used; they emit `::: {.matter matter="frontmatter"}` self-closing markers, carrying the bare word verbatim so there is no mapping table to drift), `{class: part}` attaches to the following heading.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -941,6 +1055,29 @@ describe("blocks.transform", function()
     -- it here would render {ix="B-tree"} as visible text in the book.
     local out = run('{ix: "B-tree"}\n\nB-trees are fast.\n')
     assert.is_truthy(out:find('{ix: "B-tree"}', 1, true))
+  end)
+
+  it("puts the callout class ahead of the .blurb marker", function()
+    -- Load-bearing, not cosmetic. pandoc's DocBook writer matches only the
+    -- head of the class list, so "{.blurb .tip}" degrades to a bare <para>
+    -- with no error anywhere while "{.tip .blurb}" becomes a real <tip>.
+    local out = run("{class: tip}\nB> hi\n")
+    assert.is_truthy(out:find("::: {.tip .blurb}", 1, true))
+  end)
+
+  it("escapes a body line that would close the fence early", function()
+    -- pandoc's own markdown writer escapes this rather than erroring, and the
+    -- escaped form reads back identically. Erroring would reject a document
+    -- pandoc handles fine.
+    local out = run("{class: tip}\nB> before\nB> :::\nB> after\n")
+    assert.is_truthy(out:find("\\:::", 1, true))
+  end)
+
+  it("emits a matter directive with the bare word verbatim", function()
+    -- The interface documents these exact values; carrying the bare word
+    -- through means there is no mapping table to drift out of sync.
+    local out = run("{frontmatter}\n")
+    assert.is_truthy(out:find('::: {.matter matter="frontmatter"}', 1, true))
   end)
 
   it("never transforms B> or {/blurb} inside a code fence", function()
@@ -1026,6 +1163,29 @@ function M.transform(lines, cfg, file)
     out[#out + 1] = s
   end
 
+  -- A body line that is exactly ":::" or "$$" would close the fence this pass
+  -- just opened, desynchronizing every block after it. pandoc's own markdown
+  -- writer backslash-escapes such a line (a ":::" paragraph inside a div is
+  -- written "\\:::" and reads back identically), so do the same. Erroring here
+  -- would reject documents pandoc itself handles without complaint.
+  local function emit_body(s)
+    if s:match("^%s*:::+%s*$") or s:match("^%s*%$%$%s*$") then
+      emit((s:gsub("^(%s*)", "%1\\", 1)))
+    else
+      emit(s)
+    end
+  end
+
+  -- The callout class MUST be the head of the class list. pandoc's DocBook
+  -- writer matches only the first class (`(l:_) | l `elem` admonitions`), so
+  -- "{.blurb .tip}" degrades to a bare <para> with no error anywhere, while
+  -- "{.tip .blurb}" becomes a real <tip>. This head-class-plus-marker shape is
+  -- what pandoc's DocBook and GitHub-alert readers both produce, so the same
+  -- downstream filter serves callouts from any of the three sources.
+  local function open_callout(class)
+    emit("::: {." .. class .. " .blurb}")
+  end
+
   -- Nothing may consume an attribute list and quietly forget it. Every exit
   -- from the pending state goes through here, so an unclaimed list aborts with
   -- its own line number instead of leaking braces into the book or vanishing.
@@ -1060,7 +1220,7 @@ function M.transform(lines, cfg, file)
       elseif #parsed.bare == 1 and parsed.bare[1] == "blurb" then
         -- Fenced blurb: consume until {/blurb}
         local class = callout_class(parsed, cfg, file, rec.number) or "information"
-        emit("::: {." .. class .. " .blurb}")
+        open_callout(class)
         i = i + 1
         -- A code example inside the blurb can legitimately contain {/blurb};
         -- only a line outside a fence terminates it.
@@ -1068,7 +1228,7 @@ function M.transform(lines, cfg, file)
           return not r.in_code and r.text:match("^%s*{/blurb}%s*$") ~= nil
         end
         while i <= #lines and not is_blurb_end(lines[i]) do
-          emit(lines[i].text)
+          emit_body(lines[i].text)
           i = i + 1
         end
         if i > #lines then
@@ -1088,9 +1248,9 @@ function M.transform(lines, cfg, file)
 
     elseif text:match("^B>") then
       local class = pending and callout_class(pending, cfg, file, pending_line) or "information"
-      emit("::: {." .. class .. " .blurb}")
+      open_callout(class)
       while i <= #lines and lines[i].text:match("^B>") do
-        emit(strip_prefix(lines[i].text, "B>"))
+        emit_body(strip_prefix(lines[i].text, "B>"))
         i = i + 1
       end
       emit(":::")
@@ -1099,7 +1259,7 @@ function M.transform(lines, cfg, file)
     elseif text:match("^A>") then
       emit("::: {.aside}")
       while i <= #lines and lines[i].text:match("^A>") do
-        emit(strip_prefix(lines[i].text, "A>"))
+        emit_body(strip_prefix(lines[i].text, "A>"))
         i = i + 1
       end
       emit(":::")
@@ -1107,8 +1267,16 @@ function M.transform(lines, cfg, file)
 
     else
       if pending and text:match("^#+%s") then
-        emit(text .. " " .. attributes.to_pandoc_attr(pending))
-        pending, pending_line, pending_text = nil, nil, nil
+        -- to_pandoc_attr renders id, classes and keyvals only. An unrecognized
+        -- bare word would vanish into an empty `{}` on the heading, which is
+        -- exactly the silent pass-through the hard-error constraint forbids.
+        if #pending.bare > 0 then
+          reject_pending("unrecognized attribute `" .. pending.bare[1] .. "`")
+          emit(text)
+        else
+          emit(text .. " " .. attributes.to_pandoc_attr(pending))
+          pending, pending_line, pending_text = nil, nil, nil
+        end
       elseif pending and text:match("^%s*$") then
         emit(text)   -- keep looking; blank lines do not clear a pending list
       else
@@ -1157,7 +1325,7 @@ git commit -m "feat: blurbs, asides, matter directives, part headings"
 **Interfaces:**
 
 - Consumes: `config`
-- Produces: `inline.transform(text, cfg) -> string`. Rewrites index markers to bracketed spans, `^x^` to pandoc superscript, `~x~` to subscript, and backtick-dollar inline math to `$...$`. Operates on a single line of prose and is only ever called on lines where `in_code` is false.
+- Produces: `inline.transform(text, cfg) -> string`. Rewrites index markers to bracketed spans with class `indexref` and attribute `entry` (pandoc's own convention for a Word index field), `^x^` to pandoc superscript, `~x~` to subscript, and backtick-dollar inline math to `$...$`. Operates on a single line of prose and is only ever called on lines where `in_code` is false.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1172,17 +1340,17 @@ local cfg = config.defaults()
 describe("inline.transform", function()
   it("converts spec-form index markers to bracketed spans", function()
     local out = inline.transform('The {ix: "B-tree"} B-tree is fast.', cfg)
-    assert.equals('The []{.index entry="B-tree"} B-tree is fast.', out)
+    assert.equals('The []{.indexref entry="B-tree"} B-tree is fast.', out)
   end)
 
   it("also accepts the {i:} variant", function()
     local out = inline.transform('A **token**{i: "token"} here.', cfg)
-    assert.equals('A **token**[]{.index entry="token"} here.', out)
+    assert.equals('A **token**[]{.indexref entry="token"} here.', out)
   end)
 
   it("preserves index hierarchy", function()
     local out = inline.transform('{ix: "Trees!B-tree"}x', cfg)
-    assert.equals('[]{.index entry="Trees!B-tree"}x', out)
+    assert.equals('[]{.indexref entry="Trees!B-tree"}x', out)
   end)
 
   it("converts inline math", function()
@@ -1204,7 +1372,7 @@ describe("inline.transform", function()
     -- gsub only reprocesses % when the replacement is a string; these use a
     -- function, so escaping the replacement would corrupt rather than protect.
     local out = inline.transform('The {ix: "100% coverage"} matters.', cfg)
-    assert.equals('The []{.index entry="100% coverage"} matters.', out)
+    assert.equals('The []{.indexref entry="100% coverage"} matters.', out)
   end)
 
   it("does not double a percent sign in inline math", function()
@@ -1214,12 +1382,26 @@ describe("inline.transform", function()
   it("tolerates a space before the colon", function()
     -- attributes.lua accepts "{ix : ...}", so this pass must not disagree.
     local out = inline.transform('A {ix : "term"} here.', cfg)
-    assert.equals('A []{.index entry="term"} here.', out)
+    assert.equals('A []{.indexref entry="term"} here.', out)
   end)
 
   it("converts two index markers on one line", function()
     local out = inline.transform('{ix: "a"} and {ix: "b"}', cfg)
-    assert.equals('[]{.index entry="a"} and []{.index entry="b"}', out)
+    assert.equals('[]{.indexref entry="a"} and []{.indexref entry="b"}', out)
+  end)
+
+  it("leaves a Markua marker inside a code span alone", function()
+    -- A book about Markua documents its own syntax. Rewriting inside backticks
+    -- turns the example into a real index entry and the sentence stops
+    -- teaching anything. scanner.lua makes fenced blocks opaque but cannot see
+    -- inside a line, so the guard has to live here.
+    local out = inline.transform('Write `{ix: "term"}` to index a term.', cfg)
+    assert.equals('Write `{ix: "term"}` to index a term.', out)
+  end)
+
+  it("still converts a marker outside a code span on the same line", function()
+    local out = inline.transform('`{ix: "shown"}` indexes {ix: "real"}.', cfg)
+    assert.equals('`{ix: "shown"}` indexes []{.indexref entry="real"}.', out)
   end)
 end)
 ```
@@ -1245,23 +1427,49 @@ local M = {}
 -- undone -- it would just double every literal % in the output, turning
 -- {ix: "100% coverage"} into entry="100%% coverage".
 
-function M.transform(text, cfg)
-  -- Index markers: {ix: "term"} and the {i: "term"} variant.
-  -- Lua has no alternation, so loop over the configured keys. %s* after the
-  -- key mirrors attributes.lua, which tolerates "{ix : ...}".
-  for _, key in ipairs(cfg.index_keys) do
-    local pattern = "{" .. key .. '%s*:%s*"([^"]*)"%s*}'
-    text = text:gsub(pattern, function(term)
-      return '[]{.index entry="' .. term .. '"}'
-    end)
+-- Apply `fn` only to the text between backtick code spans.
+--
+-- A code span is opaque. scanner.lua makes fenced blocks opaque, but it cannot
+-- see inside a line, and a book *about* Markua is full of prose like
+-- "write `{ix: \"term\"}` to index a term". Rewriting there turns the example
+-- into a real index entry and the sentence stops teaching anything.
+--
+-- The %1 back-reference matches a closing run of the same length as the
+-- opening run, so ``a `b` c`` behaves.
+local function outside_code_spans(text, fn)
+  local out, pos = {}, 1
+  while true do
+    local s, e = text:find("(`+).-%1", pos)
+    if not s then
+      out[#out + 1] = fn(text:sub(pos))
+      return table.concat(out)
+    end
+    out[#out + 1] = fn(text:sub(pos, s - 1))
+    out[#out + 1] = text:sub(s, e)   -- verbatim
+    pos = e + 1
   end
+end
 
-  -- Inline math: `expr`$ becomes $expr$
+function M.transform(text, cfg)
+  -- Inline math runs first. `expr`$ is Markua math rather than a code span, so
+  -- it has to be converted before the guard below makes backticks opaque --
+  -- otherwise the guard would protect it from its own rewrite.
   text = text:gsub("`([^`]-)`%$", function(expr)
     return "$" .. expr .. "$"
   end)
 
-  return text
+  -- Index markers: {ix: "term"} and the {i: "term"} variant.
+  -- Lua has no alternation, so loop over the configured keys. %s* after the
+  -- key mirrors attributes.lua, which tolerates "{ix : ...}".
+  return outside_code_spans(text, function(chunk)
+    for _, key in ipairs(cfg.index_keys) do
+      local pattern = "{" .. key .. '%s*:%s*"([^"]*)"%s*}'
+      chunk = chunk:gsub(pattern, function(term)
+        return '[]{.indexref entry="' .. term .. '"}'
+      end)
+    end
+    return chunk
+  end)
 end
 
 return M
@@ -1270,7 +1478,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/inline_spec.lua`
-Expected: PASS, 10 successes
+Expected: PASS, 12 successes
 
 - [ ] **Step 5: Commit**
 
@@ -1292,7 +1500,7 @@ git commit -m "feat: index markers and inline math"
 
 **Interfaces:**
 
-- Consumes: `attributes`, `errors`
+- Consumes: `attributes`
 - Produces:
   - `resources.kind(path) -> "image"|"video"|"audio"|"code"|"table"|"math"|"unknown"` from the file extension.
   - `resources.transform(lines, file) -> array of strings`, rewriting `![alt](path "title")` preceded by an attribute list into a pandoc image with attributes, and converting code/CSV/math resources into the appropriate pandoc construct.
@@ -1390,11 +1598,44 @@ local M = {}
 
 local KIND_BY_EXT = {
   png = "image", jpg = "image", jpeg = "image", gif = "image", svg = "image",
-  mp4 = "video", webm = "video",
-  mp3 = "audio", m4a = "audio",
+  mp4 = "video", webm = "video", mov = "video", m4v = "video",
+  avi = "video", mkv = "video", ogv = "video",
+  mp3 = "audio", m4a = "audio", wav = "audio", ogg = "audio",
+  flac = "audio", aac = "audio",
   csv = "table",
   tex = "math",
 }
+
+-- Attribute lists that blocks.transform owns, not this pass. Two shapes:
+-- an index-only list ({ix: "term"} / {i: "term"}), and a list whose bare word
+-- is a block keyword ({blurb, class: tip}, {frontmatter}). Claiming either as
+-- resource attributes is silent data loss -- the index entry disappears into
+-- the image's attribute string, and a fenced blurb whose first body line is a
+-- resource loses its opening marker and leaves {/blurb} unpaired.
+local BLOCK_BARE = {
+  blurb = true,
+  frontmatter = true, mainmatter = true, backmatter = true,
+  quiz = true, exercise = true,
+}
+
+local function belongs_to_blocks(parsed)
+  for _, word in ipairs(parsed.bare) do
+    if BLOCK_BARE[word] then
+      return true
+    end
+  end
+  if parsed.id or #parsed.classes > 0 or #parsed.bare > 0 then
+    return false
+  end
+  local saw_key = false
+  for k in pairs(parsed.keyvals) do
+    if k ~= "ix" and k ~= "i" then
+      return false
+    end
+    saw_key = true
+  end
+  return saw_key
+end
 
 local LEGACY_ALIAS = {
   ["leanpub-start-line"] = "crop-start-line",
@@ -1455,6 +1696,10 @@ function M.transform(lines, file)
     else
       local alt, path, title = text:match('^!%[(.-)%]%(([^%s)]+)%s*(.-)%)%s*$')
       if path then
+        -- Give the line back to blocks.transform before claiming anything.
+        if pending and belongs_to_blocks(pending) then
+          flush_pending()
+        end
         local kind = M.kind(path)
         if kind == "code" or kind == "table" or kind == "math"
            or kind == "video" or kind == "audio" then
@@ -1471,12 +1716,12 @@ function M.transform(lines, file)
         end
         pending, pending_text = nil, nil
       else
-        if pending and text:match("^%s*$") then
-          out[#out + 1] = text
-        else
-          flush_pending()
-          out[#out + 1] = text
-        end
+        -- Flush before the current line even when it is blank. Holding a
+        -- pending attribute line across a blank line re-emits it *after* the
+        -- blank, which merges a standalone {ix: "term"} into the following
+        -- paragraph instead of leaving it its own block.
+        flush_pending()
+        out[#out + 1] = text
       end
     end
   end
@@ -1722,8 +1967,24 @@ end
 
 function Reader(inputs, opts)
   local cfg = config.defaults()
+  -- pandoc's ReaderOptions carries only its own fields -- assigning `strict`
+  -- to it raises "Cannot set unknown property" -- so a custom reader cannot
+  -- receive arbitrary CLI flags through `opts`. bin/markua translates the
+  -- documented --lenient and --config flags into the environment instead, and
+  -- this is where they land. Without this block both flags are inert.
   if opts and opts.strict == false then
     cfg.strict = false
+  end
+  if os.getenv("MARKUA_LENIENT") then
+    cfg.strict = false
+  end
+  local cfg_path = os.getenv("MARKUA_CONFIG")
+  if cfg_path and cfg_path ~= "" then
+    local overrides, err = config.load_file(cfg_path)
+    if not overrides then
+      error(err, 0)
+    end
+    cfg = config.merge(cfg, overrides)
   end
   local name = (inputs[1] and inputs[1].name) or "<stdin>"
   local ok, result = pcall(preprocess, tostring(inputs), cfg, name)
@@ -1751,7 +2012,13 @@ Create `test/golden/index-entries.md`:
 The {ix: "B-tree"} B-tree is a self-balancing tree.
 
 A **token**{i: "token"} is a piece of a word.
+
+Splitting a node {ix: "Trees!B-tree"} keeps the tree balanced.
 ```
+
+The third entry is the hierarchy case. Both index syntaxes accept `!` as a
+level separator, and it is the only construct here whose Word rendering
+differs structurally from its source text, so it earns a fixture line.
 
 ```bash
 UPDATE=1 ./test/golden.sh
@@ -1793,7 +2060,7 @@ git commit -m "feat: pandoc custom reader entry point with golden tests"
 
 **Interfaces:**
 
-- Consumes: spans with class `index` and attribute `entry`, produced by `inline.transform`
+- Consumes: spans with class `indexref` and attribute `entry`, produced by `inline.transform`. This is exactly the shape pandoc's own Docx reader emits for a Word `XE` field (`Readers/Docx.hs`), so `markua -> docx -> pandoc` round-trips to the identical span.
 - Produces: a `Span` filter emitting `RawInline("openxml", ...)` Word field codes. No-ops for non-DOCX output because `RawInline` with an `openxml` format is ignored by other writers.
 
 - [ ] **Step 1: Write the failing test**
@@ -1815,10 +2082,17 @@ pandoc --from=src/markua.lua --to=docx \
 unzip -p "$tmp/out.docx" word/document.xml > "$tmp/document.xml"
 
 count=$(grep -o 'XE "' "$tmp/document.xml" | wc -l | tr -d ' ')
-if [ "$count" -ne 2 ]; then
-    echo "FAIL: expected 2 XE index fields, got $count"; exit 1
+if [ "$count" -ne 3 ]; then
+    echo "FAIL: expected 3 XE index fields, got $count"; exit 1
 fi
-echo "ok   index-xe produced $count Word index fields"
+
+# Counting fields does not prove they say the right thing. `Trees!B-tree` must
+# reach Word as a subentry (`Trees:B-tree`); a flat entry with a literal bang
+# still counts as a field and would pass the check above.
+if ! grep -q 'XE "Trees:B-tree"' "$tmp/document.xml"; then
+    echo "FAIL: index hierarchy not translated to a Word subentry"; exit 1
+fi
+echo "ok   index-xe produced $count Word index fields, hierarchy preserved"
 ```
 
 ```bash
@@ -1843,7 +2117,16 @@ Create `src/filters/index-xe.lua`:
 -- openxml RawInline, so this filter is safe to always enable.
 
 local function xe_field(term)
-  local escaped = term:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub('"', "'")
+  -- Markua spells index hierarchy with `!`; a Word XE field spells it with
+  -- `:`. Passing the term through unchanged produces one flat entry named
+  -- "Trees!B-tree" instead of a B-tree subentry under Trees, so the documented
+  -- hierarchy silently does not survive into the book's index.
+  --
+  -- Escape a colon or backslash the author actually wrote before translating,
+  -- so an existing colon stays literal instead of inventing an index level.
+  local escaped = term:gsub("\\", "\\\\"):gsub(":", "\\:")
+  escaped = escaped:gsub("!", ":")
+  escaped = escaped:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub('"', "'")
   return table.concat({
     '<w:r><w:fldChar w:fldCharType="begin"/></w:r>',
     '<w:r><w:instrText xml:space="preserve"> XE "', escaped, '" </w:instrText></w:r>',
@@ -1852,7 +2135,7 @@ local function xe_field(term)
 end
 
 function Span(el)
-  if el.classes:includes("index") and el.attributes["entry"] then
+  if el.classes:includes("indexref") and el.attributes["entry"] then
     return pandoc.RawInline("openxml", xe_field(el.attributes["entry"]))
   end
 end
@@ -1880,6 +2163,282 @@ filters:
 ```bash
 git add src/filters/index-xe.lua test/filters.sh justfile
 git commit -m "feat: lower index spans to Word XE index fields"
+```
+
+---
+
+### Task 10a: Index filters for LaTeX and DocBook
+
+**Files:**
+
+- Create: `src/filters/index-latex.lua`, `src/filters/index-docbook.lua`
+
+**Interfaces:**
+
+- Consumes: the same `indexref` spans Task 10 consumes.
+- Produces: `RawInline("latex", "\\index{...}")` and `RawInline("docbook", "<indexterm>...")` respectively, each a no-op for other writers.
+
+HTML and EPUB need no filter at all: pandoc's HTML writer renders unknown span
+attributes as `data-` attributes, so an index span already arrives as
+`<span class="indexref" data-entry="B-tree"></span>`. That covers two of the
+five promised writers for free, and these two filters cover two more.
+
+- [ ] **Step 1: Write the LaTeX filter**
+
+Create `src/filters/index-latex.lua`:
+
+```lua
+--- Lower index spans to LaTeX \index commands.
+--
+-- Markua and LaTeX happen to spell index hierarchy the same way -- `!` is the
+-- subentry separator in both -- so the entry text passes through untouched.
+-- Only LaTeX's own specials need escaping.
+--
+-- A \index command produces no printed index unless the preamble loads
+-- makeidx, so this filter injects that once per document. Without it the
+-- conversion silently succeeds and the book ships with no index, which is the
+-- exact failure this project exists to prevent.
+local emitted = false
+
+local ESCAPES = { ["\\"] = "\\textbackslash{}", ["{"] = "\\{", ["}"] = "\\}",
+                  ["#"] = "\\#", ["$"] = "\\$", ["%"] = "\\%", ["&"] = "\\&",
+                  ["_"] = "\\_", ["^"] = "\\textasciicircum{}" }
+
+local function escape(term)
+  -- `!` and `|` are index-syntax operators in LaTeX, not literals. `!` is
+  -- deliberately preserved; `|` would start a page-format spec, so quote it.
+  return (term:gsub("[\\{}#%$%%&_%^]", ESCAPES):gsub("|", '"|'))
+end
+
+function Span(el)
+  if el.classes:includes("indexref") and el.attributes["entry"] then
+    emitted = true
+    return pandoc.RawInline("latex", "\\index{" .. escape(el.attributes["entry"]) .. "}")
+  end
+end
+
+function Pandoc(doc)
+  if not emitted then
+    return nil
+  end
+  local header = doc.meta["header-includes"] or pandoc.MetaList({})
+  if header.t ~= "MetaList" then
+    header = pandoc.MetaList({ header })
+  end
+  header[#header + 1] = pandoc.MetaBlocks({
+    pandoc.RawBlock("latex", "\\usepackage{makeidx}\n\\makeindex"),
+  })
+  doc.meta["header-includes"] = header
+  return doc
+end
+```
+
+Filters run `Span` before `Pandoc`, so `emitted` is already correct by the time
+the preamble decision is made. `\printindex` stays the author's call: where the
+index prints is a layout decision, not something a reader should choose.
+
+- [ ] **Step 2: Write the DocBook filter**
+
+Create `src/filters/index-docbook.lua`:
+
+```lua
+--- Lower index spans to DocBook <indexterm> elements.
+--
+-- pandoc's DocBook *reader* parses <indexterm> into primary/secondary/tertiary
+-- attributes, but its writer does not round-trip them, so raw output is the
+-- only route. DocBook nests explicitly rather than with a separator, which is
+-- why the Markua `!` levels are split apart here.
+local LEVELS = { "primary", "secondary", "tertiary" }
+
+local function escape(s)
+  return (s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
+end
+
+function Span(el)
+  if not (el.classes:includes("indexref") and el.attributes["entry"]) then
+    return nil
+  end
+  local parts = {}
+  for piece in (el.attributes["entry"] .. "!"):gmatch("(.-)!") do
+    parts[#parts + 1] = piece
+  end
+  local out = { "<indexterm>" }
+  for i, piece in ipairs(parts) do
+    local tag = LEVELS[i]
+    -- DocBook defines exactly three levels; deeper Markua nesting is folded
+    -- into the last one rather than dropped.
+    if not tag then
+      out[#out] = out[#out]:gsub("</tertiary>$", "") .. "!" .. escape(piece) .. "</tertiary>"
+    else
+      out[#out + 1] = "<" .. tag .. ">" .. escape(piece) .. "</" .. tag .. ">"
+    end
+  end
+  out[#out + 1] = "</indexterm>"
+  return pandoc.RawInline("docbook", table.concat(out))
+end
+```
+
+- [ ] **Step 3: Extend the filter tests**
+
+Add to `test/filters.sh`, after the DOCX assertions:
+
+```bash
+tex=$(pandoc --from=src/markua.lua --to=latex \
+      --lua-filter=src/filters/index-latex.lua \
+      test/golden/index-entries.md)
+case "$tex" in
+    *'\index{Trees!B-tree}'*) ;;
+    *) echo "FAIL: LaTeX index hierarchy not preserved"; exit 1 ;;
+esac
+case "$tex" in
+    *'makeidx'*) ;;
+    *) echo "FAIL: makeidx preamble not injected"; exit 1 ;;
+esac
+
+db=$(pandoc --from=src/markua.lua --to=docbook \
+     --lua-filter=src/filters/index-docbook.lua \
+     test/golden/index-entries.md)
+case "$db" in
+    *'<primary>Trees</primary><secondary>B-tree</secondary>'*) ;;
+    *) echo "FAIL: DocBook indexterm nesting wrong"; exit 1 ;;
+esac
+echo "ok   index lowered for latex and docbook"
+```
+
+- [ ] **Step 4: Add the round-trip oracle**
+
+pandoc's Docx reader parses `XE` fields back into exactly the span the reader
+emitted, which is a stronger check than grepping XML. Add to `test/filters.sh`:
+
+```bash
+rt=$(pandoc --from=docx --to=native "$tmp/out.docx")
+case "$rt" in
+    *'"indexref"'*'"entry" , "Trees:B-tree"'*) ;;
+    *) echo "FAIL: index span did not survive a docx round trip"; exit 1 ;;
+esac
+echo "ok   index spans round-trip through docx"
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/filters/index-latex.lua src/filters/index-docbook.lua test/filters.sh
+git commit -m "feat: lower index spans for latex and docbook"
+```
+
+---
+
+### Task 11a: Code and table resource lowering
+
+**Files:**
+
+- Create: `src/filters/resources.lua`
+
+**Interfaces:**
+
+- Consumes: `.code-resource` and `.table-resource` spans from `resources.transform`.
+- Produces: a real `CodeBlock` and a real `Table` respectively, so the content reaches every writer instead of rendering as nothing.
+
+Without this filter a manuscript's code samples convert to a book with no code
+in it, and the conversion exits 0. Video and audio stay out of scope (see the
+out-of-scope list): neither has a print target and pandoc has no native node
+for either, so their spans remain annotations for a downstream filter.
+
+- [ ] **Step 1: Write the filter**
+
+Create `src/filters/resources.lua`:
+
+```lua
+--- Lower non-image resource spans into real pandoc blocks.
+--
+-- resources.transform annotates these but cannot read files: it is pure Lua
+-- and runs before pandoc exists. Reading happens here, where PANDOC_STATE
+-- makes the resource path available.
+local function read_file(src)
+  for _, dir in ipairs(PANDOC_STATE.resource_path or { "." }) do
+    local path = (dir == "." and src) or (dir .. "/" .. src)
+    local fh = io.open(path, "r")
+    if fh then
+      local body = fh:read("a")
+      fh:close()
+      return body
+    end
+  end
+  return nil
+end
+
+--- Apply Markua crop-start-line / crop-end-line to an already-read body.
+local function crop(body, attrs)
+  local first = tonumber(attrs["crop-start-line"])
+  local last = tonumber(attrs["crop-end-line"])
+  if not first and not last then
+    return body
+  end
+  local kept, n = {}, 0
+  for line in (body .. "\n"):gmatch("(.-)\n") do
+    n = n + 1
+    if (not first or n >= first) and (not last or n <= last) then
+      kept[#kept + 1] = line
+    end
+  end
+  return table.concat(kept, "\n")
+end
+
+function Para(el)
+  -- A resource span is the whole paragraph; pandoc has already wrapped it.
+  if #el.content ~= 1 or el.content[1].t ~= "Span" then
+    return nil
+  end
+  local span = el.content[1]
+  local src = span.attributes["src"]
+  if not src then
+    return nil
+  end
+
+  if span.classes:includes("code-resource") then
+    local body = read_file(src)
+    if not body then
+      error("cannot read code resource: " .. src, 0)
+    end
+    local lang = span.attributes["format"] or src:match("%.([%w]+)$") or ""
+    return pandoc.CodeBlock(crop(body, span.attributes),
+                            pandoc.Attr(span.identifier, { lang }, {}))
+  end
+
+  if span.classes:includes("table-resource") then
+    local body = read_file(src)
+    if not body then
+      error("cannot read table resource: " .. src, 0)
+    end
+    -- Delegate CSV parsing to pandoc rather than hand-rolling quote handling.
+    local parsed = pandoc.read(body, "csv")
+    return parsed.blocks
+  end
+end
+```
+
+- [ ] **Step 2: Test it**
+
+Add to `test/filters.sh`. A code resource must reach the output as real code,
+not as nothing:
+
+```bash
+printf 'puts "hi"\n' > "$tmp/hello.rb"
+printf '![](hello.rb)\n' > "$tmp/code.md"
+out=$(pandoc --from=src/markua.lua --to=html \
+      --lua-filter=src/filters/resources.lua \
+      --resource-path="$tmp" "$tmp/code.md")
+case "$out" in
+    *'puts'*) echo "ok   code resource lowered to a real code block" ;;
+    *) echo "FAIL: code resource produced no content"; exit 1 ;;
+esac
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/filters/resources.lua test/filters.sh
+git commit -m "feat: lower code and table resources into real blocks"
 ```
 
 ---
@@ -1985,7 +2544,7 @@ git commit -m "feat: map callouts to named Word paragraph styles"
 **Interfaces:**
 
 - Consumes: `src/markua.lua`, both filters
-- Produces: `markua <input.md> -o <output.ext> [pandoc args...]` — resolves the reader and filter paths relative to the script, applies both filters by default, and passes everything else through to pandoc.
+- Produces: `markua [--lenient] [--config <file>] <input.md> -o <output.ext> [pandoc args...]` — resolves the reader and filter paths relative to the script, applies the whole filter set by default (each is a no-op for writers it does not target), translates the two Markua flags into the environment, and passes everything else through to pandoc.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2030,11 +2589,36 @@ Create `bin/markua`:
 # --reference-doc, --toc, and friends all work.
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# CDPATH='' rather than a bare CDPATH= : shellcheck flags the empty-assignment
+# form as SC1007, and `just lint` runs shellcheck over every file with no
+# severity threshold, so the bare form fails the repo's own gate on commit.
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
+# The reader runs inside pandoc, which passes it no custom CLI flags -- its
+# ReaderOptions object rejects unknown fields. Intercept the two documented
+# Markua flags here and hand them to the reader through the environment, which
+# is the only channel that survives the pandoc boundary.
+export MARKUA_LENIENT="${MARKUA_LENIENT:-}"
+export MARKUA_CONFIG="${MARKUA_CONFIG:-}"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --lenient) MARKUA_LENIENT=1; shift ;;
+        --config) MARKUA_CONFIG="${2:?--config needs a path}"; shift 2 ;;
+        --config=*) MARKUA_CONFIG="${1#--config=}"; shift ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+
+# Every filter is a no-op for writers it does not target, so applying the whole
+# set unconditionally costs nothing and means the right lowering happens for
+# whichever -o the user picked.
 exec pandoc \
     --from="$root/src/markua.lua" \
+    --lua-filter="$root/src/filters/resources.lua" \
     --lua-filter="$root/src/filters/index-xe.lua" \
+    --lua-filter="$root/src/filters/index-latex.lua" \
+    --lua-filter="$root/src/filters/index-docbook.lua" \
     --lua-filter="$root/src/filters/callouts.lua" \
     "$@"
 ```
@@ -2079,7 +2663,7 @@ git commit -m "feat: markua CLI wrapper"
 **Interfaces:**
 
 - Consumes: everything
-- Produces: a script that converts every file of a real Markua manuscript and asserts no errors, plus counts of preserved constructs.
+- Produces: a script that converts every file of a real Markua manuscript and asserts no errors, then compares index-marker and resource counts against the source and confirms all five writers complete.
 
 This is where the reader meets syntax the fixtures did not anticipate. Expect to find bugs here and to loop back into earlier tasks.
 
@@ -2123,6 +2707,41 @@ if [ "$xe" -eq 0 ]; then
     echo "FAIL: no Word index fields produced across the whole manuscript"
     exit 1
 fi
+
+# A nonzero total is a weak gate: it stays green while most entries vanish.
+# Compare against the source instead. Both index syntaxes count, and the
+# comparison is >= rather than == because one source marker can legitimately
+# produce more than one field after a split.
+src_ix=$(grep -oE '\{i x?:|\{ix:|\{i:' "$src"/*.md | wc -l | tr -d ' ')
+if [ "$xe" -lt "$src_ix" ]; then
+    echo "FAIL: $src_ix index markers in source, only $xe Word fields produced"
+    exit 1
+fi
+
+# Resource attributes are the other half of the stated differentiator and were
+# previously unchecked, so a regression that dropped every one of them passed.
+res=$(for d in "$tmp"/*.docx; do unzip -p "$d" word/document.xml; done \
+      | grep -c 'w:drawing' | tr -d ' ')
+src_res=$(grep -c '^!\[' "$src"/*.md | awk -F: '{s+=$2} END {print s+0}')
+if [ "$src_res" -gt 0 ] && [ "$res" -eq 0 ]; then
+    echo "FAIL: $src_res resources in source, none survived into the output"
+    exit 1
+fi
+echo "resources embedded: $res (source references: $src_res)"
+
+# The Goal promises five writers. DOCX is asserted above; the rest are checked
+# for clean conversion so a writer-specific break cannot hide behind a green
+# DOCX run. Deeper per-format preservation is an open question, not a gate.
+for fmt in epub latex icml html; do
+    for md in "$src"/*.md; do
+        ./bin/markua "$md" --resource-path="$src/resources" \
+            -o "$tmp/fmt-check.$fmt" 2>"$tmp/err" && continue
+        echo "FAIL: $fmt conversion failed on $(basename "$md")"
+        sed 's/^/    /' "$tmp/err"
+        exit 1
+    done
+done
+echo "ok   all five writers converted the whole manuscript"
 ```
 
 ```bash
@@ -2150,7 +2769,7 @@ Expected: all green
 
 - [ ] **Step 6: Write the README**
 
-`README.md` must cover: what the project is, the delegating-reader design and why a native parser was rejected, install (pandoc 3.10+, `luarocks install busted` for development), `bin/markua` usage with a `--reference-doc` example, the supported-construct table, the out-of-scope list (quizzes, exercises), and how to override callout classes.
+`README.md` must cover: what the project is, the delegating-reader design and why a native parser was rejected, install (pandoc 3.10+, `luarocks install busted` for development), `bin/markua` usage with a `--reference-doc` example, the supported-construct table, the full out-of-scope list from the section below (quizzes and exercises, smart crosslinks, `Book.txt` assembly, emoji shortcodes, Leanpub document settings), the one-file-per-invocation boundary and what that means for converting a whole book, and how to override callout classes with `--config`.
 
 - [ ] **Step 7: Commit**
 
@@ -2168,5 +2787,19 @@ Recorded so they are decisions rather than oversights:
 - **Quizzes and exercises** (Markua 0.10 course constructs). Rejected with a clear error by Task 8.
 - **Smart crosslinks** (`[](#id)` auto-generating link text from the target heading). Requires a second pass over the whole document to resolve titles; the reader is per-file. Add as a filter later.
 - **`Book.txt` multi-file assembly.** The reader converts one file at a time; ordering is the caller's job. A `--book` mode in `bin/markua` is the natural follow-up.
+- **Video and audio resource lowering.** `resources.lua` still classifies them and emits an annotated span, but no filter lowers that span into a writer construct. Neither has a print target, and pandoc has no native node for either. Code and CSV-table resources *are* lowered (Task 11a).
 - **Emoji shortcodes and Font Awesome** (`:joy:`, `:fa-github:`). Pandoc's `emoji` extension covers the first; Font Awesome has no sensible print target.
 - **Leanpub document settings** (`bookfilename`, `soft-breaks`). Parsed and ignored; they configure Leanpub's build, not pandoc's.
+
+---
+
+## Deferred / Open Questions
+
+### From 2026-08-08 review
+
+Five of the six items raised in review were settled and moved to Key Technical
+Decisions above. One remains.
+
+- **The architectural bet is falsified only after twelve tasks** — Architecture / Phase 6 (P1, cross-model Codex, confidence 75)
+
+  If representative Markua cannot be expressed in the chosen pandoc extensions, the discovery arrives after the scanner, both transform passes, and all filters are built, forcing rework across the whole layer. A corpus inventory and one end-to-end conversion slice ahead of Phase 1 would surface that risk while it is still cheap. The counter-argument is that the phases are already ordered to build the cheap pure-Lua modules first, and review has since verified the riskiest interface assumptions directly against pandoc 3.10.1 — index span round-tripping, DocBook admonition output, and delimiter escaping all confirmed — which retires much of what the spike would have discovered.
