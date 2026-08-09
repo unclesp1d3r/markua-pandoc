@@ -123,6 +123,22 @@ describe("scanner", function()
     assert.equals("a", round_trip("a"))
     assert.equals("", round_trip(""))
     assert.equals("```\ncode\n```\n", round_trip("```\ncode\n```\n"))
+    -- The round trip reproduces the NORMALIZED input, so CRLF in means LF out.
+    assert.equals("a\nb\n", round_trip("a\r\nb\r\n"))
+  end)
+
+  it("numbers the trailing record one past the last real line (KTD3)", function()
+    -- The sentinel record exists only for newline-terminated input, and its
+    -- number names no line an author can open. Later modules report error
+    -- positions straight from record.number, so pin both halves here.
+    local terminated = scanner.scan("a\nb\n")
+    assert.equals(3, #terminated)
+    assert.equals(3, terminated[3].number)
+    assert.equals("", terminated[3].text)
+
+    local unterminated = scanner.scan("a\nb")
+    assert.equals(2, #unterminated)
+    assert.equals(2, unterminated[2].number)
   end)
 
   it("closes on a longer closing fence but not on a shorter one", function()

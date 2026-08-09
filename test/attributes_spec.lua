@@ -31,6 +31,9 @@ describe("attributes.parse", function()
   it("promotes class: to the classes list", function()
     local a = attributes.parse("{class: part}", "f.md", 1)
     assert.same({ "part" }, a.classes)
+    -- The negative half is the whole point of promoting it: without this,
+    -- a refactor that also wrote the pair through to keyvals stays green.
+    assert.is_nil(a.keyvals["class"])
   end)
 
   it("collects bare words", function()

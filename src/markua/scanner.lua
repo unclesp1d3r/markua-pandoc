@@ -29,6 +29,11 @@ local function indent_columns(line)
   return column
 end
 
+-- The two fence markers, as a table rather than chained matches: Lua patterns
+-- have no alternation, so every multi-alternative match in this reader is an
+-- explicit loop over a table of patterns.
+local FENCE_PATTERNS = { "^(```+)(.*)$", "^(~~~+)(.*)$" }
+
 -- Returns marker and info string if the line opens or closes a fence.
 -- CommonMark allows a fence to be indented up to three columns; at four it is
 -- an indented code block instead, which is handled separately below.
@@ -37,9 +42,12 @@ local function fence_parts(line)
     return nil
   end
   local body = line:gsub("^ *", "")
-  local marker, info = body:match("^(```+)(.*)$")
-  if not marker then
-    marker, info = body:match("^(~~~+)(.*)$")
+  local marker, info
+  for _, pattern in ipairs(FENCE_PATTERNS) do
+    marker, info = body:match(pattern)
+    if marker then
+      break
+    end
   end
   if not marker then
     return nil
@@ -118,11 +126,7 @@ function M.scan(text)
       end
     end
 
-    if not blank then
-      prev_blank = false
-    else
-      prev_blank = true
-    end
+    prev_blank = blank
 
     lines[#lines + 1] = record
   end

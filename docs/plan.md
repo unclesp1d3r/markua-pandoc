@@ -625,6 +625,22 @@ describe("scanner", function()
     assert.equals("a", round_trip("a"))
     assert.equals("", round_trip(""))
     assert.equals("```\ncode\n```\n", round_trip("```\ncode\n```\n"))
+    -- The round trip reproduces the NORMALIZED input, so CRLF in means LF out.
+    assert.equals("a\nb\n", round_trip("a\r\nb\r\n"))
+  end)
+
+  it("numbers the trailing record one past the last real line (KTD3)", function()
+    -- The sentinel record exists only for newline-terminated input, and its
+    -- number names no line an author can open. Later modules report error
+    -- positions straight from record.number, so pin both halves here.
+    local terminated = scanner.scan("a\nb\n")
+    assert.equals(3, #terminated)
+    assert.equals(3, terminated[3].number)
+    assert.equals("", terminated[3].text)
+
+    local unterminated = scanner.scan("a\nb")
+    assert.equals(2, #unterminated)
+    assert.equals(2, unterminated[2].number)
   end)
 
   it("closes on a longer closing fence but not on a shorter one", function()
@@ -697,6 +713,11 @@ local function indent_columns(line)
   return column
 end
 
+-- The two fence markers, as a table rather than chained matches: Lua patterns
+-- have no alternation, so every multi-alternative match in this reader is an
+-- explicit loop over a table of patterns.
+local FENCE_PATTERNS = { "^(```+)(.*)$", "^(~~~+)(.*)$" }
+
 -- Returns marker and info string if the line opens or closes a fence.
 -- CommonMark allows a fence to be indented up to three columns; at four it is
 -- an indented code block instead, which is handled separately below.
@@ -705,9 +726,12 @@ local function fence_parts(line)
     return nil
   end
   local body = line:gsub("^ *", "")
-  local marker, info = body:match("^(```+)(.*)$")
-  if not marker then
-    marker, info = body:match("^(~~~+)(.*)$")
+  local marker, info
+  for _, pattern in ipairs(FENCE_PATTERNS) do
+    marker, info = body:match(pattern)
+    if marker then
+      break
+    end
   end
   if not marker then
     return nil
@@ -786,11 +810,7 @@ function M.scan(text)
       end
     end
 
-    if not blank then
-      prev_blank = false
-    else
-      prev_blank = true
-    end
+    prev_blank = blank
 
     lines[#lines + 1] = record
   end
@@ -804,7 +824,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/scanner_spec.lua`
-Expected: PASS, 16 successes
+Expected: PASS, 17 successes
 
 - [ ] **Step 5: Commit**
 
@@ -868,6 +888,9 @@ describe("attributes.parse", function()
   it("promotes class: to the classes list", function()
     local a = attributes.parse("{class: part}", "f.md", 1)
     assert.same({ "part" }, a.classes)
+    -- The negative half is the whole point of promoting it: without this,
+    -- a refactor that also wrote the pair through to keyvals stays green.
+    assert.is_nil(a.keyvals["class"])
   end)
 
   it("collects bare words", function()
@@ -970,6 +993,15 @@ Create `src/markua/attributes.lua`:
 -- Consumers own rejecting bare words they do not recognize (e.g. an
 -- unparseable key, or a construct-specific word like "blurb"); this module
 -- only tokenizes.
+--
+-- `parse` and `to_pandoc_attr` are NOT inverses, and must not be chained
+-- directly on a value carrying a source escape. `parse` yields Markua-level
+-- text (`\"` still escaped); `to_pandoc_attr` expects semantic text and
+-- escapes what it is given, so feeding one straight into the other turns
+-- `She said \"hi\"` into a value pandoc reads back with literal backslashes.
+-- Whichever consumer first needs the round trip owns the unescape step
+-- between them; where that belongs is a Markua-spec question this module
+-- deliberately does not answer.
 local errors = require("src.markua.errors")
 
 local M = {}
@@ -1077,6 +1109,10 @@ end
 -- value `He said "hi"`, while an unescaped `"` does not degrade gracefully --
 -- pandoc abandons the whole construct and renders the `:::` delimiters as
 -- literal paragraph text.
+-- Escapes a semantic value for pandoc's attribute syntax. Backslash first:
+-- escaping the quote first would double-escape the backslashes that pass
+-- introduces. Expects already-unescaped text, not `parse`'s raw keyvals --
+-- see the composition note at the top of this file.
 local function escape_value(v)
   v = v:gsub("\\", "\\\\")
   v = v:gsub('"', '\\"')

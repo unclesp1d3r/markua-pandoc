@@ -6,6 +6,15 @@
 -- Consumers own rejecting bare words they do not recognize (e.g. an
 -- unparseable key, or a construct-specific word like "blurb"); this module
 -- only tokenizes.
+--
+-- `parse` and `to_pandoc_attr` are NOT inverses, and must not be chained
+-- directly on a value carrying a source escape. `parse` yields Markua-level
+-- text (`\"` still escaped); `to_pandoc_attr` expects semantic text and
+-- escapes what it is given, so feeding one straight into the other turns
+-- `She said \"hi\"` into a value pandoc reads back with literal backslashes.
+-- Whichever consumer first needs the round trip owns the unescape step
+-- between them; where that belongs is a Markua-spec question this module
+-- deliberately does not answer.
 local errors = require("src.markua.errors")
 
 local M = {}
@@ -113,6 +122,10 @@ end
 -- value `He said "hi"`, while an unescaped `"` does not degrade gracefully --
 -- pandoc abandons the whole construct and renders the `:::` delimiters as
 -- literal paragraph text.
+-- Escapes a semantic value for pandoc's attribute syntax. Backslash first:
+-- escaping the quote first would double-escape the backslashes that pass
+-- introduces. Expects already-unescaped text, not `parse`'s raw keyvals --
+-- see the composition note at the top of this file.
 local function escape_value(v)
   v = v:gsub("\\", "\\\\")
   v = v:gsub('"', '\\"')
