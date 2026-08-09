@@ -116,8 +116,14 @@ classified output rather than re-scanning raw text.
 
 A post-parse transform that turns an AST annotation the reader left behind into an
 output-format-specific construct. Filters exist for the constructs markdown cannot
-carry through the delegation step — index entries and callout styling — and are the
-second half of what makes a markdown-to-markdown pipeline insufficient.
+carry through the delegation step — index entries, callout styling, and the resource
+kinds that have no markdown representation — and are the second half of what makes a
+markdown-to-markdown pipeline insufficient.
+
+A construct usually needs one filter per output family rather than one filter overall,
+because what a target format can express varies: some formats have a native construct,
+some need a raw escape hatch, and some already carry the annotation's attributes
+through without help, needing no filter at all.
 
 ### Golden file
 
@@ -125,6 +131,17 @@ A recorded pandoc AST for a given input, checked in beside that input and compar
 against on every run. Golden files are regenerated deliberately rather than
 automatically, because a golden file generated from broken code silently locks the bug
 in as expected behavior — regenerated output is read before it is committed.
+
+### Round-trip check
+
+A verification that converts a document to a target format, reads it back with pandoc's
+own reader for that format, and asserts the original annotation is recovered unchanged.
+
+It is a stronger guarantee than asserting on the generated output directly: a search for
+an expected marker in generated output passes even when the marker carries the wrong
+content, whereas a round trip only passes when the meaning survives. A round-trip check
+is available only where pandoc can both write and read the format, which is why it
+supplements rather than replaces Golden files.
 
 ## Flagged ambiguities
 
