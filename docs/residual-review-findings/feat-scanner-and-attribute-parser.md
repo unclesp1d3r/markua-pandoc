@@ -70,8 +70,12 @@ routed to the author rather than guessed at.
   because the correct composed output depends on the unresolved unescape decision
   above.
 - `to_pandoc_attr` emits `id` and each class unescaped, so an id or class
-  containing a space or quote would produce a syntactically broken attribute
-  block. Not reachable from `parse` today and not covered.
+  containing a space or quote produces a syntactically broken attribute block.
+  This **is** reachable straight from `parse`: `{#my id, .a class}` yields
+  `id = "my id"` and a class of `a class`, which re-emit as `{#my id .a class}`.
+  Uncovered, and it stays reachable until either the parser validates shortcut
+  values or the writer escapes them — the same open question as the unterminated
+  quote above, since both turn on which malformed input the parser may reject.
 
 ## Review context
 

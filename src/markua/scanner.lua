@@ -8,12 +8,12 @@ local M = {}
 local TAB_STOP = 4
 
 -- Column width of a line's leading whitespace, expanding tabs to the next
--- 4-column stop (CommonMark's rule, verified against pandoc 3.10.1). A
--- character count treats a tab as one column, which keeps a tab-indented
--- "\t```" a fence and a tab-indented "\t{timeout: 30}" prose -- both wrong:
--- pandoc parses the first as an indented code block and the second as a
--- CodeBlock. Both the fence-recognition and indented-code checks below route
--- through this same measure so they agree with each other and with pandoc.
+-- 4-column stop (CommonMark's rule, verified against pandoc 3.10.1). Matching
+-- only spaces scores a tab as zero, which keeps a tab-indented "\t```" a fence
+-- and a tab-indented "\t{timeout: 30}" prose -- both wrong: pandoc parses the
+-- first as an indented code block and the second as a CodeBlock. Both the
+-- fence-recognition and indented-code checks below route through this same
+-- measure so they agree with each other and with pandoc.
 local function indent_columns(line)
   local column = 0
   for i = 1, #line do
