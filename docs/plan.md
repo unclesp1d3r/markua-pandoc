@@ -75,6 +75,43 @@ verified.
   `front`), matching what the attribute parser already produces, so there is no
   mapping table to drift.
 
+Settled while implementing Tasks 2 and 3. Each was found by executing the
+reference source this document ships, not by reading it, so the rationale names
+what was run.
+
+- **Indentation is measured in columns, expanding tabs to 4-column stops.**
+  Counting space characters scores a tab as zero, which reported a
+  tab-indented `{timeout: 30}` as prose. pandoc 3.10.1 parses that line -- and
+  the same line preceded by two spaces and a tab, where the tab advances to the
+  next stop -- as a `CodeBlock`, so the attribute-list transform would have rewritten a code
+  sample, the exact corruption fence-awareness exists to prevent. The same
+  measure governs the fence-indent test, because a tab-indented ` ``` ` is an
+  indented code block to pandoc, not a fence. *(Rejected: scoring a tab as one
+  column, which keeps that line a fence and disagrees with pandoc.)*
+
+- **`scanner.scan` normalizes CRLF and lone CR to LF.** The scanner already
+  owns line splitting, so it is the one place a carriage return can be removed
+  once instead of in every later transform. CRLF is substituted before lone CR;
+  the reverse order collapses `\r\n` into `\n\n` and invents a blank line. This
+  one is proactive rather than a fix for observed breakage -- no manuscript in
+  the repository uses CRLF -- but the cost is one function and the alternative
+  surfaces at Task 13 with every module to fix at once.
+
+- **`to_pandoc_attr` backslash-escapes `\` and `"` in emitted values, escaping
+  the backslash first.** Verified against pandoc 3.10.1: `title="He said
+  \"hi\""` parses back to `He said "hi"`, while the unescaped form does not
+  degrade to a wrong title -- pandoc abandons the construct and renders the
+  `:::` delimiters as literal paragraph text, losing the whole block. Escaping
+  the quote first would double-escape the backslashes that pass introduces.
+
+- **`split_fields` tracks backslash parity when it toggles quote state.**
+  Flipping on every `"` leaves the tokenizer mis-synchronized after an odd
+  number of escaped quotes: `{title: "She said \"hi, there\""}` truncated to
+  `"She said \"hi` and invented a bare word `there\""`. This is tokenizing, not
+  unescaping -- `parse` still hands `\"` through verbatim, because whether
+  Markua defines an escape convention is a separate question from whether the
+  parser may silently drop half a value.
+
 **Independently implemented, not ported.** Where this reader mirrors a pandoc
 behavior -- delimiter escaping, fence sizing -- the behavior was observed and
 reimplemented in Lua. pandoc is GPL and this project is Apache-2.0; conventions
@@ -453,14 +490,29 @@ git commit -m "feat: error type with source position and test harness"
 
 **Interfaces:**
 
-- Consumes: `errors` from Task 1
+- Consumes: nothing. The scanner has no error path, so it does not require `errors`.
 - Produces: `scanner.scan(text) -> array of line records`. Each record is `{ text = string, number = integer, in_code = boolean, fence = "open"|"close"|nil, info = string|nil }`. `in_code` is true for lines *inside* a fence and for the fence delimiters themselves. `info` carries the fence info string (e.g. `python`, `$`) on the opening fence record.
+- `scan` normalizes CRLF and lone CR to LF, so no record's `text` carries a stray carriage return and no downstream module has to special-case one.
+- Joining every record's `text` with `\n` reproduces the normalized input exactly. Newline-terminated input therefore ends in an empty record, and that record's `number` counts one past the document's last real line — a caller reporting an error position straight from `record.number` must not assume every record names a line an author can open.
 
 - [ ] **Step 1: Write the failing test**
 
 Create `test/scanner_spec.lua`:
 
 ```lua
+-- Spec for the fence-aware line scanner (src/markua/scanner.lua).
+--
+-- Written before the module exists: this unit's TDD cycle starts red. Run
+-- with `busted test/scanner_spec.lua` from the repo root --
+-- require("src.markua.scanner") resolves through .busted's lpath only from
+-- there.
+--
+-- The first seven scenarios are docs/plan.md Task 2 Step 1's own spec,
+-- carried over verbatim so a regression in the corrected module is visible
+-- as a failure rather than a silent reclassification. Everything after them
+-- covers this plan's three corrections: KTD1 (column-based indentation),
+-- KTD2 (line-ending normalization), and KTD3 (the trailing-record round
+-- trip) -- plus the remaining fence-boundary cases R4-R5 call for.
 local scanner = require("src.markua.scanner")
 
 describe("scanner", function()
@@ -513,6 +565,94 @@ describe("scanner", function()
     local lines = scanner.scan("A paragraph\n    wrapped by hand.\n")
     assert.is_false(lines[2].in_code)
   end)
+
+  it("treats a tab-indented line after a blank line as code (KTD1)", function()
+    -- A bare space count scores a tab as zero columns, so the reference
+    -- scanner missed this. pandoc parses it as CodeBlock.
+    local lines = scanner.scan("Consider:\n\n\t{timeout: 30}\n\nDone.\n")
+    assert.is_false(lines[1].in_code)
+    assert.is_true(lines[3].in_code)
+    assert.is_false(lines[5].in_code)
+  end)
+
+  it("treats two spaces then a tab as reaching column four (KTD1)", function()
+    -- Column 2 plus a tab advances to the next 4-column stop, i.e. column 4.
+    local lines = scanner.scan("Consider:\n\n  \t{timeout: 30}\n\nDone.\n")
+    assert.is_true(lines[3].in_code)
+  end)
+
+  it("treats a tab-indented fence marker as indented code, not a fence (KTD1)", function()
+    -- A tab advances to column 4, which is indented code to pandoc, not a
+    -- fence -- so this line carries in_code but no fence field at all.
+    local lines = scanner.scan("Consider:\n\n\t```\nDone.\n")
+    assert.is_true(lines[3].in_code)
+    assert.is_nil(lines[3].fence)
+  end)
+
+  it("normalizes CRLF line endings while keeping fence and info detection intact (KTD2)", function()
+    local lines = scanner.scan('a\r\n```python\r\n{"k": 1}\r\n```\r\nb')
+    for _, record in ipairs(lines) do
+      assert.is_nil(record.text:find("\r"))
+    end
+    assert.equals("python", lines[2].info)
+    assert.equals("open", lines[2].fence)
+    assert.equals("close", lines[4].fence)
+    assert.is_true(lines[3].in_code)
+    assert.is_false(lines[5].in_code)
+  end)
+
+  it("splits a lone-CR document the same as its LF equivalent (KTD2)", function()
+    local cr = scanner.scan("a\rb\rc")
+    local lf = scanner.scan("a\nb\nc")
+    assert.equals(#lf, #cr)
+    for i = 1, #lf do
+      assert.equals(lf[i].text, cr[i].text)
+      assert.equals(lf[i].in_code, cr[i].in_code)
+    end
+  end)
+
+  it("round-trips exactly when every record's text is joined with \\n (KTD3, R10)", function()
+    local function round_trip(text)
+      local lines = scanner.scan(text)
+      local parts = {}
+      for _, record in ipairs(lines) do
+        parts[#parts + 1] = record.text
+      end
+      return table.concat(parts, "\n")
+    end
+
+    assert.equals("a\n", round_trip("a\n"))
+    assert.equals("a", round_trip("a"))
+    assert.equals("", round_trip(""))
+    assert.equals("```\ncode\n```\n", round_trip("```\ncode\n```\n"))
+  end)
+
+  it("closes on a longer closing fence but not on a shorter one", function()
+    local longer = scanner.scan("```\ncode\n````\nafter")
+    assert.equals("close", longer[3].fence)
+    assert.is_false(longer[4].in_code)
+
+    local shorter = scanner.scan("````\ncode\n```\nafter")
+    assert.is_nil(shorter[3].fence)
+    assert.is_true(shorter[3].in_code)
+    assert.is_true(shorter[4].in_code)
+  end)
+
+  it("does not close an open fence when the delimiter carries an info string", function()
+    local lines = scanner.scan("```\ncode\n```text\nstill code\n```\nafter")
+    assert.is_nil(lines[3].fence)
+    assert.is_true(lines[3].in_code)
+    assert.is_true(lines[4].in_code)
+    assert.equals("close", lines[5].fence)
+    assert.is_false(lines[6].in_code)
+  end)
+
+  it("leaves every remaining line in_code when a fence is never closed", function()
+    local lines = scanner.scan("```\na\nb\nc")
+    for i = 2, #lines do
+      assert.is_true(lines[i].in_code)
+    end
+  end)
 end)
 ```
 
@@ -533,17 +673,35 @@ Create `src/markua/scanner.lua`:
 -- with '{', which a naive attribute-list match would corrupt.
 local M = {}
 
--- How deep a line is indented, and the text with that indent removed.
-local function indent_of(line)
-  local spaces = line:match("^( *)")
-  return #spaces
+local TAB_STOP = 4
+
+-- Column width of a line's leading whitespace, expanding tabs to the next
+-- 4-column stop (CommonMark's rule, verified against pandoc 3.10.1). A
+-- character count treats a tab as one column, which keeps a tab-indented
+-- "\t```" a fence and a tab-indented "\t{timeout: 30}" prose -- both wrong:
+-- pandoc parses the first as an indented code block and the second as a
+-- CodeBlock. Both the fence-recognition and indented-code checks below route
+-- through this same measure so they agree with each other and with pandoc.
+local function indent_columns(line)
+  local column = 0
+  for i = 1, #line do
+    local ch = line:sub(i, i)
+    if ch == " " then
+      column = column + 1
+    elseif ch == "\t" then
+      column = column - (column % TAB_STOP) + TAB_STOP
+    else
+      break
+    end
+  end
+  return column
 end
 
 -- Returns marker and info string if the line opens or closes a fence.
--- CommonMark allows a fence to be indented up to three spaces; at four it is
+-- CommonMark allows a fence to be indented up to three columns; at four it is
 -- an indented code block instead, which is handled separately below.
 local function fence_parts(line)
-  if indent_of(line) > 3 then
+  if indent_columns(line) > 3 then
     return nil
   end
   local body = line:gsub("^ *", "")
@@ -561,13 +719,35 @@ local function is_blank(line)
   return line:match("^%s*$") ~= nil
 end
 
+-- Normalize CRLF and lone-CR line endings to LF before splitting, so no
+-- downstream module -- most of which anchor Lua patterns on "$" or "\n" --
+-- has to special-case a carriage return. CRLF must be substituted first: a
+-- lone-CR pass run first would collapse "\r\n" into "\n\n", inventing a
+-- blank line the source never had.
+local function normalize_newlines(text)
+  text = text:gsub("\r\n", "\n")
+  text = text:gsub("\r", "\n")
+  return text
+end
+
 function M.scan(text)
+  text = normalize_newlines(text)
+
   local lines = {}
   local open_marker = nil
-  local indented = false      -- inside a four-space indented code block
+  local indented = false      -- inside a four-column indented code block
   local prev_blank = true     -- start of document counts as a blank
   local number = 0
 
+  -- The "text .. \n" split (and the empty trailing record it produces for
+  -- newline-terminated input) is load-bearing, not an off-by-one: it is what
+  -- makes join(records, "\n") reproduce the input exactly (R10). Every
+  -- transform stage scans and rejoins, so an exact round trip is what stops
+  -- trailing newlines from drifting across stages. Do not trim it. Its one
+  -- consequence: that trailing record's `number` counts one past the
+  -- document's last real line, so a caller reporting an error position from
+  -- `record.number` must not assume every record names a line an author can
+  -- open.
   for line in (text .. "\n"):gmatch("(.-)\n") do
     number = number + 1
     local blank = is_blank(line)
@@ -588,19 +768,19 @@ function M.scan(text)
       record.fence = "open"
       record.info = info
     else
-      -- An indented code block starts on a four-space indent after a blank
+      -- An indented code block starts on a four-column indent after a blank
       -- line, and runs until a non-blank line dedents. Without this, a code
       -- sample such as "    {timeout: 30}" reads as a Markua attribute list
       -- and gets rewritten -- the same corruption fences protect against.
       if indented then
         if blank then
           record.in_code = true          -- blank lines do not end the block
-        elseif indent_of(line) >= 4 then
+        elseif indent_columns(line) >= 4 then
           record.in_code = true
         else
           indented = false
         end
-      elseif prev_blank and not blank and indent_of(line) >= 4 then
+      elseif prev_blank and not blank and indent_columns(line) >= 4 then
         indented = true
         record.in_code = true
       end
@@ -624,7 +804,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/scanner_spec.lua`
-Expected: PASS, 7 successes
+Expected: PASS, 16 successes
 
 - [ ] **Step 5: Commit**
 
@@ -655,6 +835,16 @@ git commit -m "feat: fence-aware line scanner"
 Create `test/attributes_spec.lua`:
 
 ```lua
+-- Spec for the attribute-list parser (src/markua/attributes.lua).
+--
+-- Written before the module exists: this unit's TDD cycle starts red. Run with
+-- `busted test/attributes_spec.lua` from the repo root -- require("src.markua.attributes")
+-- resolves through .busted's lpath only from there.
+--
+-- The first six `describe("attributes.parse", ...)` scenarios and the
+-- to_pandoc_attr id/classes/keyvals scenario are docs/plan.md Task 3 Step 1
+-- verbatim. Everything below them covers the KTD4, KTD8, KTD5, and R17
+-- corrections this plan makes to that reference module.
 local attributes = require("src.markua.attributes")
 
 describe("attributes.parse", function()
@@ -697,6 +887,68 @@ describe("attributes.to_pandoc_attr", function()
     local a = attributes.parse('{#x, class: tip, title: "A B"}', "f.md", 1)
     assert.equals('{#x .tip title="A B"}', attributes.to_pandoc_attr(a))
   end)
+
+  it("backslash-escapes a quote in a value so pandoc parses it back intact (KTD4)", function()
+    -- Verified against pandoc 3.10.1: title="He said \"hi\"" parses to the
+    -- value `He said "hi"`. The unescaped form does not degrade to a wrong
+    -- title -- pandoc abandons the whole construct and renders the `:::`
+    -- delimiters as literal paragraph text.
+    local a = { id = nil, classes = {}, keyvals = { title = 'He said "hi"' }, bare = {} }
+    assert.equals('{title="He said \\"hi\\""}', attributes.to_pandoc_attr(a))
+  end)
+
+  it("escapes a backslash in a value (KTD4)", function()
+    -- pandoc spells a literal backslash as title="a\\b"; escape \ before "
+    -- so the quote pass does not double-escape the backslashes it introduces.
+    local a = { id = nil, classes = {}, keyvals = { path = "a\\b" }, bare = {} }
+    assert.equals('{path="a\\\\b"}', attributes.to_pandoc_attr(a))
+  end)
+
+  it("orders emitted keyvals deterministically across repeated calls (R18)", function()
+    local a = { id = nil, classes = {}, keyvals = { zeta = "1", alpha = "2" }, bare = {} }
+    local first = attributes.to_pandoc_attr(a)
+    local second = attributes.to_pandoc_attr(a)
+    assert.equals(first, second)
+    assert.equals('{alpha="2" zeta="1"}', first)
+  end)
+end)
+
+describe("attributes.parse index variant", function()
+  it("parses the widespread {i: ...} variant alongside {ix: ...}", function()
+    local a = attributes.parse('{i: "B-tree"}', "f.md", 1)
+    assert.equals("B-tree", a.keyvals["i"])
+  end)
+end)
+
+describe("attributes.parse fenced-blurb bare words (KTD5, R16)", function()
+  it("yields bare = {'/blurb'} so the fenced-blurb closer survives for blocks.lua", function()
+    local a = attributes.parse("{/blurb}", "f.md", 1)
+    assert.same({ "/blurb" }, a.bare)
+  end)
+
+  it("lands a field with an unparseable key in bare verbatim rather than dropping it", function()
+    -- A space inside the key breaks the `^([%w%-_]+)%s*:%s*(.*)$` match, so
+    -- this is neither a key/value pair, an id, nor a class shortcut.
+    local a = attributes.parse("{bad key: value}", "f.md", 1)
+    assert.same({ "bad key: value" }, a.bare)
+  end)
+end)
+
+describe("attributes.parse backslash-parity tokenizing (KTD8, R14a)", function()
+  it("does not split on a comma following a backslash-escaped quote inside a value", function()
+    local a = attributes.parse('{title: "She said \\"hi, there\\""}', "f.md", 1)
+    assert.equals('She said \\"hi, there\\"', a.keyvals["title"])
+    assert.same({}, a.bare)
+  end)
+end)
+
+describe("attributes.parse errors (R17)", function()
+  it("raises a structured error carrying file and line when the text is not an attribute list", function()
+    local ok, err = pcall(attributes.parse, "not braces", "f.md", 7)
+    assert.is_false(ok)
+    assert.equals("f.md", err.file)
+    assert.equals(7, err.line)
+  end)
 end)
 ```
 
@@ -713,7 +965,11 @@ Create `src/markua/attributes.lua`:
 --- Parse Markua attribute lists: {key: value, "quoted", #id, .class}.
 --
 -- Pure syntax. This module has no opinion about what any attribute means;
--- blocks.lua and resources.lua interpret them.
+-- blocks.lua and resources.lua interpret them. It never unescapes a source
+-- value -- `\"` in `parse`'s input stays `\"` verbatim in the parsed value.
+-- Consumers own rejecting bare words they do not recognize (e.g. an
+-- unparseable key, or a construct-specific word like "blurb"); this module
+-- only tokenizes.
 local errors = require("src.markua.errors")
 
 local M = {}
@@ -727,12 +983,35 @@ function M.is_attribute_line(text)
   return t:sub(1, 1) == "{" and t:sub(-1) == "}" and #t >= 2
 end
 
+-- Count the run of consecutive backslashes immediately before position i in
+-- body (1-indexed, exclusive of i itself). Used to decide whether the `"` at
+-- i is escaped: an odd count means the backslash run ends in an unescaped
+-- backslash that swallows this quote, so it does not toggle quote state.
+local function backslash_run_length(body, i)
+  local count = 0
+  local j = i - 1
+  while j >= 1 and body:sub(j, j) == "\\" do
+    count = count + 1
+    j = j - 1
+  end
+  return count
+end
+
 -- Split on commas that are not inside double quotes.
+--
+-- A `"` toggles quote state only when it is not escaped -- i.e. when it is
+-- preceded by an even number (including zero) of consecutive backslashes.
+-- Without this, `{title: "She said \"hi, there\""}` desyncs on the first
+-- escaped `"`: the naive every-quote-toggles version treats it as a closing
+-- quote, so the comma after it splits the field, truncating the value to
+-- `"She said \"hi` and inventing a spurious bare word `there\""`. This is
+-- tokenizing only -- the backslash stays in the field text verbatim; `parse`
+-- does not unescape it.
 local function split_fields(body)
   local fields, buf, in_quote = {}, {}, false
   for i = 1, #body do
     local c = body:sub(i, i)
-    if c == '"' then
+    if c == '"' and backslash_run_length(body, i) % 2 == 0 then
       in_quote = not in_quote
       buf[#buf + 1] = c
     elseif c == "," and not in_quote then
@@ -776,12 +1055,32 @@ function M.parse(text, file, line)
       elseif f:sub(1, 1) == "." then
         parsed.classes[#parsed.classes + 1] = f:sub(2)
       else
+        -- Neither key: value, #id, nor .class. This is not necessarily an
+        -- error: `blurb`, `frontmatter`, and `/blurb` are all legitimate
+        -- bare words whose meaning belongs to a later module (KTD5). A
+        -- consumer that does not recognize this word names it in the hard
+        -- error AGENTS.md requires; attributes.lua stays pure syntax and
+        -- does not guess.
         parsed.bare[#parsed.bare + 1] = f
       end
     end
   end
 
   return parsed
+end
+
+-- Backslash-escape a value for pandoc's attribute syntax. `\` is escaped
+-- first, then `"`. Escaping `"` first would double-escape the backslashes
+-- that pass introduces: e.g. a literal `"` would become `\"`, and then the
+-- `\` pass would turn that into `\\"` instead of the intended `\"`. Verified
+-- against pandoc 3.10.1 (KTD4): title="He said \"hi\"" parses back to the
+-- value `He said "hi"`, while an unescaped `"` does not degrade gracefully --
+-- pandoc abandons the whole construct and renders the `:::` delimiters as
+-- literal paragraph text.
+local function escape_value(v)
+  v = v:gsub("\\", "\\\\")
+  v = v:gsub('"', '\\"')
+  return v
 end
 
 function M.to_pandoc_attr(parsed)
@@ -792,13 +1091,16 @@ function M.to_pandoc_attr(parsed)
   for _, c in ipairs(parsed.classes) do
     parts[#parts + 1] = "." .. c
   end
+  -- Sorted keys are the determinism mechanism for R18: iterating pairs()
+  -- directly would order keyvals by Lua's internal hash order, which is not
+  -- guaranteed stable across runs.
   local keys = {}
   for k in pairs(parsed.keyvals) do
     keys[#keys + 1] = k
   end
   table.sort(keys)
   for _, k in ipairs(keys) do
-    parts[#parts + 1] = string.format('%s="%s"', k, parsed.keyvals[k])
+    parts[#parts + 1] = string.format('%s="%s"', k, escape_value(parsed.keyvals[k]))
   end
   return "{" .. table.concat(parts, " ") .. "}"
 end
@@ -809,7 +1111,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/attributes_spec.lua`
-Expected: PASS, 7 successes
+Expected: PASS, 15 successes
 
 - [ ] **Step 5: Commit**
 
