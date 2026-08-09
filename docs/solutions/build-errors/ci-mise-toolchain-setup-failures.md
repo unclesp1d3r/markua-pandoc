@@ -71,7 +71,7 @@ gap that `mise-action`'s `--locked` install mode cannot tolerate.
   update pandoc version to latest in mise.toml") to chase the newest release.
   This was pinned back five commits later in `11ce31f` ("chore: pin pandoc
   version to 3.10.1 in mise.toml") to the exact version
-  `pandoc = "3.10.1"` (`mise.toml:7`) — `latest` reintroduces the same
+  `pandoc = "3.10.1"` (`mise.toml`, `[tools]`) — `latest` reintroduces the same
   local/CI drift risk that pinning was supposed to eliminate, for a tool the
   custom reader API has a hard minimum-version requirement on.
 
@@ -112,15 +112,23 @@ it is a luarocks rock, not a tool `mise.toml` can pin — mise's registry has
 `lua` but neither `busted` nor a standalone `luarocks`:
 
 ```yaml
-      - name: Install busted
+      - name: Install dev dependencies
         run: |
-          luarocks install --local busted
+          just install
           luarocks path --lr-bin | tr ':' '\n' >> "$GITHUB_PATH"
 ```
 
 The `tr ':' '\n'` is not incidental: `luarocks path --lr-bin` returns a
 colon-joined string, and `$GITHUB_PATH` takes one entry per line.
 (session history)
+
+> **Updated 2026-08-08.** This step originally ran `luarocks install --local busted`
+> directly. Dev dependencies were since single-homed in
+> `markua-pandoc-dev-1.rockspec`, which `just install` reads, and luacheck joined
+> busted there. See
+> [`dev-rockspec-single-homes-non-mise-dev-deps.md`](../tooling-decisions/dev-rockspec-single-homes-non-mise-dev-deps.md)
+> — that doc is canonical for the rockspec consolidation. The point this section
+> makes is unchanged: these tools are luarocks rocks, not something `mise.toml` pins.
 
 **Fix 2 — drop `luajit` from `mise.toml` rather than work around the lock gap
 (commit `ec76d6c`).** Removed with `mise use --rm luajit`, not by hand-editing
@@ -164,7 +172,7 @@ Both fixes remove a source of truth CI was accidentally maintaining in
 parallel with `mise.toml`/`mise.lock`:
 
 - `jdx/mise-action` (`.github/workflows/ci.yml:32-37`) is now the only
-  provisioning step. Per `AGENTS.md:56-60`, `mise.toml` pins versions and
+  provisioning step. Per `AGENTS.md` ("Toolchain"), `mise.toml` pins versions and
   `mise.lock` pins the resolved artifacts so local dev and CI resolve
   identically; every per-tool GitHub Action (`leafo/gh-actions-luarocks`,
   `extractions/setup-just`, the manual pandoc `.deb`) was a second,
@@ -176,7 +184,7 @@ parallel with `mise.toml`/`mise.lock`:
   opaque busted or golden-file failure with no indication the toolchain
   itself was the culprit.
 - Dropping `luajit` removes a tool the project does not actually use for
-  anything load-bearing. Per `AGENTS.md:62-65`, pandoc embeds Lua 5.4, and
+  anything load-bearing. Per `AGENTS.md` ("Toolchain"), pandoc embeds Lua 5.4, and
   that is the interpreter that executes the reader in production (the
   `ec76d6c` commit message is where the sharper "PUC Lua 5.4" phrasing comes
   from); busted
@@ -227,12 +235,12 @@ retired a Lua 5.5 matrix leg earlier in the branch: checking
   config" — a hand-edit during this same work produced a duplicate `lua` key
   that made the TOML invalid and broke every `mise` invocation until
   repaired.) Follow every `mise use` with `mise lock --platform linux-x64` so
-  CI's `--locked` install stays resolvable — per `AGENTS.md:58-60`, this is a
+  CI's `--locked` install stays resolvable — per `AGENTS.md` ("Toolchain"), this is a
   required pair, not two independent steps.
 - **A version pinned as `"latest"` in `mise.toml` is not free of drift
   risk for tools with a hard minimum-version requirement.** `pandoc` was
   briefly set to `"latest"` (`832f503`) before being pinned back to
-  `"3.10.1"` (`11ce31f`, `mise.toml:7`) specifically because the custom
+  `"3.10.1"` (`11ce31f`, `mise.toml` `[tools]`) specifically because the custom
   reader API needs 3.10+ and nothing enforces that floor when the version
   string floats. The `Verify toolchain` step's `awk` guard is the backstop,
   not the pin.
@@ -240,20 +248,19 @@ retired a Lua 5.5 matrix leg earlier in the branch: checking
 ## Related Issues
 
 - PR #1 — <https://github.com/unclesp1d3r/markua-pandoc/pull/1> — "chore:
-  bootstrap repo with plan, CI, and contributor docs" (open as of this
-  writing; the commits above land as part of this branch, not yet merged to
-  `main`). **Every commit SHA cited in this doc is branch-local to PR #1 and
-  will be rewritten if that PR squash- or rebase-merges.** PR #1 is the
-  durable reference; locate an individual change by its commit subject
-  rather than by SHA.
-- `AGENTS.md:54-67` ("Toolchain") — the canonical policy this learning is a
+  bootstrap repo with plan, CI, and contributor docs". **Merged as
+  `8e72601`; the squash rewrote every SHA cited above, exactly as this doc
+  predicted — they resolve in the object store but are unreachable from
+  `main`.** PR #1 is the durable reference; locate an individual change by its
+  commit subject rather than by SHA.
+- `AGENTS.md` ("Toolchain") — the canonical policy this learning is a
   concrete instance of. `CONTRIBUTING.md` ("Setup") states the same
   `mise use` + `mise lock --platform linux-x64` pairing for contributors.
-- `docs/plan.md` Step 2 ("Install the Lua toolchain") still documents the
-  pre-`mise` setup path (`brew install lua luarocks` plus a manual `PATH`
-  export), which contradicts `AGENTS.md`/`CONTRIBUTING.md` and the
-  `mise install` recipe embedded later in the same document. Worth a
-  documentation refresh; out of scope for this fix.
+- `docs/plan.md` Step 2 ("Install the Lua toolchain") was flagged here as still
+  documenting a pre-`mise` setup path. That is **resolved** — Step 2 now routes
+  setup through `just setup` and explicitly says not to `brew install lua`. The
+  `export PATH="$HOME/.luarocks/bin:$PATH"` line remains, but that is the
+  documented post-`mise` convention (`CONTRIBUTING.md`, "Setup"), not a leftover.
 - Commit `7ff2b17` — "fix: select pandoc deb by host architecture; declare
   shellcheck" — the architecture-hardcoding bug in the pre-`mise` bootstrap
   instructions, cited above as a parallel example of hand-rolled installer
