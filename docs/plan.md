@@ -808,6 +808,44 @@ describe("scanner container nesting", function()
     assert.is_true(lines[3].in_code)
   end)
 end)
+
+describe("scanner container-state isolation", function()
+  it("does not let a closed quoted fence clear a later top-level list", function()
+    -- The fence's blockquote depth outlived the fence, so a later top-level
+    -- line looked like it had left a container and cleared the list's content
+    -- column -- turning that item's lazy continuation into code.
+    local lines = scanner.scan("> ```\n> x\n> ```\n\n1. item\n\n    {ix: \"term\"}\n")
+    assert.is_false(lines[7].in_code)
+  end)
+
+  it("measures a list marker whose gap is a tab", function()
+    -- pandoc reads "1.<tab>item" as a list, so its content column is 4 and a
+    -- five-column line is a continuation, not code. Counting bytes instead of
+    -- expanding the tab put the content column at 0 and called it code.
+    local continuation = scanner.scan("1.\titem\n\n\t {ix: \"term\"}\n")
+    assert.is_false(continuation[3].in_code)
+
+    local code = scanner.scan("1.\titem\n\n\t\t sample\n")
+    assert.is_true(code[3].in_code)
+  end)
+
+  it("measures a bullet marker whose gap is a tab", function()
+    local lines = scanner.scan("-\titem\n\n\t {ix: \"term\"}\n")
+    assert.is_false(lines[3].in_code)
+  end)
+
+  it("replays list context correctly when an unclosed fence reverts", function()
+    -- The stray ``` is not a fence, so "1. item" is a lazy continuation of
+    -- the paragraph it starts rather than a list -- no content column is
+    -- opened, and the four-space line after the blank is ordinary top-level
+    -- indented code. Verified against pandoc, which emits exactly that Para
+    -- plus CodeBlock pair.
+    local lines = scanner.scan("```\n1. item\n\n    {ix: \"term\"}\n")
+    assert.is_false(lines[1].in_code)
+    assert.is_false(lines[2].in_code)
+    assert.is_true(lines[4].in_code)
+  end)
+end)
 ```
 
 - [ ] **Step 2: Run it to make sure it fails**
@@ -910,20 +948,37 @@ local function strip_blockquote(line)
   end
 end
 
+-- Display column of the byte at `stop`, expanding tabs to the same 4-column
+-- stops as indent_columns. A list marker's gap may be a tab, so a byte count
+-- is not a column count.
+local function column_at(text, stop)
+  local column = 0
+  for i = 1, stop - 1 do
+    if text:sub(i, i) == "\t" then
+      column = column - (column % TAB_STOP) + TAB_STOP
+    else
+      column = column + 1
+    end
+  end
+  return column
+end
+
 -- Content column of a list item's body, or nil when the line starts no item.
 -- A bullet or ordered marker shifts where that item's content begins, and
 -- CommonMark measures its nested code from there -- so "1. item" followed by
 -- a four-space line is a lazy paragraph continuation (content column 3, and
 -- 4 < 3 + 4), not code. Measuring from column 0 instead made the scanner
 -- report that line as code and skip a Markua attribute an author indented by
--- habit under a numbered step.
-local LIST_MARKERS = { "^( *)([-+*])( +)", "^( *)(%d+[.)])( +)" }
+-- habit under a numbered step. The gap after the marker may be a tab, which
+-- pandoc still reads as a list, so both the indent and the gap expand through
+-- the tab-stop rule rather than counting bytes.
+local LIST_MARKERS = { "^([ \t]*)([-+*])([ \t]+)", "^([ \t]*)(%d+[.)])([ \t]+)" }
 
 local function list_content_column(rest)
   for _, pattern in ipairs(LIST_MARKERS) do
     local indent, marker, gap = rest:match(pattern)
     if indent then
-      return #indent + #marker + #gap
+      return column_at(rest, #indent + #marker + #gap + 1)
     end
   end
   return nil
@@ -962,6 +1017,7 @@ function M.scan(text)
   local indented = false      -- inside a four-column indented code block
   local prev_blank = true     -- start of document counts as a blank
   local list_column = 0       -- content column of the innermost open list item
+  local list_depth = 0        -- blockquote depth the open list item belongs to
   local number = 0
 
   -- The "text .. \n" split (and the empty trailing record it produces for
@@ -987,19 +1043,22 @@ function M.scan(text)
     -- quote, a bare ">" is the blank line that separates blocks.
     local blank = is_blank(rest)
 
-    -- Leaving a blockquote ends any list opened inside it. A blank line does
-    -- not: a loose list keeps its item open across one.
-    if depth < open_depth then
-      list_column = 0
+    -- Leaving a blockquote ends any list opened inside it. That is the list's
+    -- own container depth, not the fence's: keying this off open_depth let a
+    -- closed quoted fence leave a stale depth behind, which then cleared a
+    -- later top-level list and misread its lazy continuation as code. A blank
+    -- line ends nothing -- a loose list keeps its item open across one.
+    if depth < list_depth then
+      list_column, list_depth = 0, depth
     end
 
     local column = indent_columns(rest)
     if not blank and not open_marker then
       local started = list_content_column(rest)
       if started and column <= list_column + 3 then
-        list_column = started
+        list_column, list_depth = started, depth
       elseif column < list_column then
-        list_column = 0       -- dedented out of the item
+        list_column, list_depth = 0, depth   -- dedented out of the item
       end
     end
 
@@ -1022,12 +1081,14 @@ function M.scan(text)
       -- this reader's target format means the opener was never a fence.
       if depth < open_depth then
         reclassify(records, facts, open_index, number - 1)
-        open_marker, open_index = nil, nil
+        open_marker, open_index, open_depth = nil, nil, 0
         record.in_code = false
       elseif marker and depth == open_depth and marker:sub(1, 1) == open_marker:sub(1, 1)
          and #marker >= #open_marker and info == "" then
         record.fence = "close"
-        open_marker, open_index = nil, nil
+        -- Clear the depth with the fence: a stale open_depth outlives the
+        -- construct it described and corrupts unrelated later state.
+        open_marker, open_index, open_depth = nil, nil, 0
       end
     elseif marker then
       open_marker, open_depth, open_index = marker, depth, number
@@ -1076,7 +1137,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/scanner_spec.lua`
-Expected: PASS, 28 successes
+Expected: PASS, 32 successes
 
 - [ ] **Step 5: Commit**
 

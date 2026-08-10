@@ -259,3 +259,41 @@ describe("scanner container nesting", function()
     assert.is_true(lines[3].in_code)
   end)
 end)
+
+describe("scanner container-state isolation", function()
+  it("does not let a closed quoted fence clear a later top-level list", function()
+    -- The fence's blockquote depth outlived the fence, so a later top-level
+    -- line looked like it had left a container and cleared the list's content
+    -- column -- turning that item's lazy continuation into code.
+    local lines = scanner.scan("> ```\n> x\n> ```\n\n1. item\n\n    {ix: \"term\"}\n")
+    assert.is_false(lines[7].in_code)
+  end)
+
+  it("measures a list marker whose gap is a tab", function()
+    -- pandoc reads "1.<tab>item" as a list, so its content column is 4 and a
+    -- five-column line is a continuation, not code. Counting bytes instead of
+    -- expanding the tab put the content column at 0 and called it code.
+    local continuation = scanner.scan("1.\titem\n\n\t {ix: \"term\"}\n")
+    assert.is_false(continuation[3].in_code)
+
+    local code = scanner.scan("1.\titem\n\n\t\t sample\n")
+    assert.is_true(code[3].in_code)
+  end)
+
+  it("measures a bullet marker whose gap is a tab", function()
+    local lines = scanner.scan("-\titem\n\n\t {ix: \"term\"}\n")
+    assert.is_false(lines[3].in_code)
+  end)
+
+  it("replays list context correctly when an unclosed fence reverts", function()
+    -- The stray ``` is not a fence, so "1. item" is a lazy continuation of
+    -- the paragraph it starts rather than a list -- no content column is
+    -- opened, and the four-space line after the blank is ordinary top-level
+    -- indented code. Verified against pandoc, which emits exactly that Para
+    -- plus CodeBlock pair.
+    local lines = scanner.scan("```\n1. item\n\n    {ix: \"term\"}\n")
+    assert.is_false(lines[1].in_code)
+    assert.is_false(lines[2].in_code)
+    assert.is_true(lines[4].in_code)
+  end)
+end)
