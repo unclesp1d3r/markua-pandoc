@@ -163,3 +163,34 @@ describe("attributes.to_pandoc_attr name representability", function()
     assert.equals("{#3things .with-dash .with_us .with.dot}", attributes.to_pandoc_attr(a))
   end)
 end)
+
+describe("attributes.parse duplicate keys", function()
+  it("keeps the last occurrence of a repeated key", function()
+    -- Last-wins is what the keyvals table gives; pin it so the behavior is a
+    -- decision rather than an accident a later refactor could flip.
+    local a = attributes.parse('{title: "first", title: "second"}', "f.md", 1)
+    assert.equals("second", a.keyvals["title"])
+  end)
+
+  it("accumulates repeated class keys rather than replacing them", function()
+    local a = attributes.parse("{class: tip, class: wide}", "f.md", 1)
+    assert.same({ "tip", "wide" }, a.classes)
+  end)
+end)
+
+describe("attributes parse-to-emit composition", function()
+  it("double-escapes a source escape when parse is chained into to_pandoc_attr", function()
+    -- Pins the documented trap: parse yields Markua-level text with the
+    -- escape intact, to_pandoc_attr escapes what it is given, so chaining
+    -- them without an unescape step produces a doubled backslash. Whichever
+    -- consumer first needs the round trip owns that step.
+    local parsed = attributes.parse('{title: "a \\"b\\""}', "f.md", 1)
+    assert.equals('a \\"b\\"', parsed.keyvals["title"])
+    assert.equals([[{title="a \\\"b\\\""}]], attributes.to_pandoc_attr(parsed))
+  end)
+
+  it("round-trips a semantic value that carries no source escape", function()
+    local parsed = attributes.parse('{title: "Chapter 3"}', "f.md", 1)
+    assert.equals('{title="Chapter 3"}', attributes.to_pandoc_attr(parsed))
+  end)
+end)

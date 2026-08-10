@@ -104,6 +104,27 @@ what was run.
   `:::` delimiters as literal paragraph text, losing the whole block. Escaping
   the quote first would double-escape the backslashes that pass introduces.
 
+- **The scanner is measured against the reader's own target format, not
+  CommonMark.** `pandoc.read` is called with `markdown_strict` plus the
+  extension list above, and that dialect disagrees with CommonMark where it
+  matters here: an unclosed fence is a code block running to EOF in
+  `commonmark` and `gfm`, but is *not a fence at all* in `markdown_strict` --
+  the delimiter stays literal text. The scanner follows the target format, so
+  an unterminated fence reverts to prose. Modelling the spec instead would make
+  the scanner and the parser it feeds disagree, which is the one thing this
+  module cannot afford. *(Rejected: following the CommonMark rule, which is
+  more famous and wrong for this pipeline.)*
+
+- **Indentation is measured from the container's content column.** A blockquote
+  prefix is stripped before anything else, and a list item shifts where its
+  content begins, so `1. item` followed by a four-space line is a lazy
+  paragraph continuation rather than code -- content column 3, and 4 < 3 + 4.
+  Measuring from column 0 made the scanner blind to every fence inside a `>`
+  quote and made it report an author's habitually-indented `{ix: "term"}` under
+  a numbered step as code, silently dropping the index entry. Both directions
+  were found by differential testing against pandoc rather than by reading, and
+  the fixtures are frozen as specs.
+
 - **Parse permissively, emit strictly.** The two ends of this module answer to
   different traditions, and conflating them produced two bugs. Markua is a
   markdown dialect, and markdown has no such thing as a parse error, so `parse`
@@ -674,10 +695,14 @@ describe("scanner", function()
     assert.equals("close", longer[3].fence)
     assert.is_false(longer[4].in_code)
 
+    -- A shorter delimiter does not close, so this fence never closes -- and
+    -- an unclosed fence is not a fence under the reader's target format, so
+    -- the whole run reverts to prose. Verified: pandoc parses this as one
+    -- Para containing inline Code, not a CodeBlock.
     local shorter = scanner.scan("````\ncode\n```\nafter")
     assert.is_nil(shorter[3].fence)
-    assert.is_true(shorter[3].in_code)
-    assert.is_true(shorter[4].in_code)
+    assert.is_false(shorter[3].in_code)
+    assert.is_false(shorter[4].in_code)
   end)
 
   it("does not close an open fence when the delimiter carries an info string", function()
@@ -689,11 +714,98 @@ describe("scanner", function()
     assert.is_false(lines[6].in_code)
   end)
 
-  it("leaves every remaining line in_code when a fence is never closed", function()
+  it("treats a fence that never closes as prose, not code", function()
+    -- markdown_strict and its extensions -- the format the reader hands to
+    -- pandoc.read -- require a fence to close before it is a fence at all;
+    -- an unclosed one is literal text. commonmark and gfm instead run the
+    -- block to EOF. Following the target format is what keeps this scanner's
+    -- answer and pandoc's identical, which is the module's whole job.
     local lines = scanner.scan("```\na\nb\nc")
-    for i = 2, #lines do
-      assert.is_true(lines[i].in_code)
+    for i = 1, #lines do
+      assert.is_false(lines[i].in_code)
     end
+    assert.is_nil(lines[1].fence)
+  end)
+
+  it("reverts an unclosed fence inside a blockquote when the quote ends", function()
+    local lines = scanner.scan("> ```\n> quoted\n\nafter\n")
+    assert.is_false(lines[1].in_code)
+    assert.is_false(lines[2].in_code)
+    assert.is_false(lines[4].in_code)
+  end)
+end)
+
+-- Every expectation below is pandoc 3.10.1's own answer for the same input,
+-- taken under the exact format the reader hands to pandoc.read
+-- (markdown_strict plus its extensions) rather than reasoned from the spec.
+-- The scanner exists to predict what pandoc will treat as code, so a
+-- disagreement here is a scanner bug by definition.
+describe("scanner container nesting", function()
+  it("sees a fenced block inside a blockquote", function()
+    local lines = scanner.scan('> ```python\n> {"k": 1}\n> ```\n\nafter\n')
+    assert.is_true(lines[1].in_code)
+    assert.equals("open", lines[1].fence)
+    assert.equals("python", lines[1].info)
+    assert.is_true(lines[2].in_code)
+    assert.equals("close", lines[3].fence)
+    assert.is_false(lines[5].in_code)
+  end)
+
+  it("sees an indented block inside a blockquote", function()
+    -- A bare ">" is the blank line that opens the indented block.
+    local lines = scanner.scan("> para\n>\n>     sample\n\nafter\n")
+    assert.is_true(lines[3].in_code)
+    assert.is_false(lines[5].in_code)
+  end)
+
+  it("sees a fence nested two blockquotes deep", function()
+    local lines = scanner.scan("> > ```\n> > sample\n> > ```\n")
+    assert.is_true(lines[2].in_code)
+  end)
+
+  it("handles a blockquote marker with no space after it", function()
+    local lines = scanner.scan(">```\n>sample\n>```\n")
+    assert.is_true(lines[2].in_code)
+  end)
+
+  it("does not treat a four-space line under a numbered item as code", function()
+    -- "1. " puts content at column 3, so code needs column 7. Four spaces is
+    -- a lazy paragraph continuation -- and an attribute an author indents by
+    -- habit there must still be converted, not skipped as code.
+    local lines = scanner.scan("1. item one\n\n    {ix: \"term\"}\n\n2. item two\n")
+    assert.is_false(lines[3].in_code)
+  end)
+
+  it("treats an eight-space line under a numbered item as code", function()
+    local lines = scanner.scan("1. item one\n\n        sample\n\n2. item two\n")
+    assert.is_true(lines[3].in_code)
+  end)
+
+  it("measures a bullet item's content column too", function()
+    local indented = scanner.scan("- item\n\n      sample\n\n- two\n")
+    assert.is_true(indented[3].in_code)
+
+    local para = scanner.scan("- item\n\n  {ix: \"term\"}\n\n- two\n")
+    assert.is_false(para[3].in_code)
+  end)
+
+  it("keeps a fence aligned to a wide list marker a fence, info string and all", function()
+    -- "10. " puts content at column 4. Measuring from column 0 would reject
+    -- the delimiter as over-indented and silently drop the language.
+    local lines = scanner.scan("10. item ten\n\n    ```python\n    sample\n    ```\n")
+    assert.equals("open", lines[3].fence)
+    assert.equals("python", lines[3].info)
+    assert.is_true(lines[4].in_code)
+  end)
+
+  it("handles a fence inside a list inside a blockquote", function()
+    local lines = scanner.scan("> 1. item\n>\n>    ```\n>    sample\n>    ```\n")
+    assert.is_true(lines[4].in_code)
+  end)
+
+  it("resumes plain measurement after a blockquote ends", function()
+    local lines = scanner.scan("> quoted\n\n    sample\n")
+    assert.is_true(lines[3].in_code)
   end)
 end)
 ```
@@ -780,13 +892,76 @@ local function normalize_newlines(text)
   return text
 end
 
+-- Strip a blockquote prefix, returning its depth and the content after it.
+-- CommonMark allows up to three spaces before each ">" and swallows one
+-- optional space after it. Without this the scanner is blind to every fence
+-- and indented block inside a quote: pandoc parses "> ```python" as a real
+-- CodeBlock, while a raw-line scanner sees prose and lets a later transform
+-- rewrite the sample -- the corruption this module exists to prevent, just
+-- one container deeper.
+local function strip_blockquote(line)
+  local depth, rest = 0, line
+  while true do
+    local after = rest:match("^ ? ? ?>%s?(.*)$")
+    if not after then
+      return depth, rest
+    end
+    depth, rest = depth + 1, after
+  end
+end
+
+-- Content column of a list item's body, or nil when the line starts no item.
+-- A bullet or ordered marker shifts where that item's content begins, and
+-- CommonMark measures its nested code from there -- so "1. item" followed by
+-- a four-space line is a lazy paragraph continuation (content column 3, and
+-- 4 < 3 + 4), not code. Measuring from column 0 instead made the scanner
+-- report that line as code and skip a Markua attribute an author indented by
+-- habit under a numbered step.
+local LIST_MARKERS = { "^( *)([-+*])( +)", "^( *)(%d+[.)])( +)" }
+
+local function list_content_column(rest)
+  for _, pattern in ipairs(LIST_MARKERS) do
+    local indent, marker, gap = rest:match(pattern)
+    if indent then
+      return #indent + #marker + #gap
+    end
+  end
+  return nil
+end
+
+-- Re-run the indented-code rule over a range whose fence turned out never to
+-- close. Same rules as the main loop, so a reverted range is classified
+-- exactly as if the stray fence delimiter had never been treated as one.
+local function reclassify(records, facts, from, to)
+  local indented = false
+  local prev_blank = from > 1 and facts[from - 1].blank or true
+  for i = from, to do
+    local fact = facts[i]
+    local in_code = false
+    if indented then
+      if fact.blank or fact.relative >= 4 then
+        in_code = true
+      else
+        indented = false
+      end
+    elseif prev_blank and not fact.blank and fact.relative >= 4 then
+      indented, in_code = true, true
+    end
+    records[i].in_code = in_code
+    records[i].fence = nil
+    records[i].info = nil
+    prev_blank = fact.blank
+  end
+end
+
 function M.scan(text)
   text = normalize_newlines(text)
 
-  local lines = {}
-  local open_marker = nil
+  local records, facts = {}, {}
+  local open_marker, open_depth, open_index = nil, 0, nil
   local indented = false      -- inside a four-column indented code block
   local prev_blank = true     -- start of document counts as a blank
+  local list_column = 0       -- content column of the innermost open list item
   local number = 0
 
   -- The "text .. \n" split (and the empty trailing record it produces for
@@ -800,48 +975,99 @@ function M.scan(text)
   -- open.
   for line in (text .. "\n"):gmatch("(.-)\n") do
     number = number + 1
-    local blank = is_blank(line)
-    local marker, info = fence_parts(line)
+
+    -- Everything below measures the line's *content*, not its raw text: the
+    -- blockquote prefix is stripped first, then indentation is taken relative
+    -- to the enclosing list item's content column. A fence or indented block
+    -- means the same thing at any container depth, so resolving the prefix
+    -- once here keeps one rule instead of one per container.
+    local depth, rest = strip_blockquote(line)
+
+    -- Blankness is a property of the content, not the raw line: inside a
+    -- quote, a bare ">" is the blank line that separates blocks.
+    local blank = is_blank(rest)
+
+    -- Leaving a blockquote ends any list opened inside it. A blank line does
+    -- not: a loose list keeps its item open across one.
+    if depth < open_depth then
+      list_column = 0
+    end
+
+    local column = indent_columns(rest)
+    if not blank and not open_marker then
+      local started = list_content_column(rest)
+      if started and column <= list_column + 3 then
+        list_column = started
+      elseif column < list_column then
+        list_column = 0       -- dedented out of the item
+      end
+    end
+
+    -- A fence sits 0-3 columns past the container's content column; at four
+    -- it is indented code instead. Measuring the stripped content means one
+    -- fence rule serves every container depth.
+    local relative = column - list_column
+    local marker, info
+    if relative >= 0 and relative <= 3 then
+      marker, info = fence_parts((rest:gsub("^%s*", "")))
+    end
+
     local record = { text = line, number = number, in_code = open_marker ~= nil }
+    records[number] = record
+    facts[number] = { blank = blank, relative = relative }
 
     if open_marker then
-      -- Inside a fence: only a matching closing marker matters.
-      if marker and marker:sub(1, 1) == open_marker:sub(1, 1)
+      -- Inside a fence: only a matching closer at the same blockquote depth
+      -- counts. A shallower depth means the quote ended first, which under
+      -- this reader's target format means the opener was never a fence.
+      if depth < open_depth then
+        reclassify(records, facts, open_index, number - 1)
+        open_marker, open_index = nil, nil
+        record.in_code = false
+      elseif marker and depth == open_depth and marker:sub(1, 1) == open_marker:sub(1, 1)
          and #marker >= #open_marker and info == "" then
         record.fence = "close"
-        open_marker = nil
+        open_marker, open_index = nil, nil
       end
     elseif marker then
-      open_marker = marker
+      open_marker, open_depth, open_index = marker, depth, number
       indented = false
       record.in_code = true
       record.fence = "open"
       record.info = info
     else
-      -- An indented code block starts on a four-column indent after a blank
-      -- line, and runs until a non-blank line dedents. Without this, a code
-      -- sample such as "    {timeout: 30}" reads as a Markua attribute list
-      -- and gets rewritten -- the same corruption fences protect against.
+      -- An indented code block starts four columns past the container's
+      -- content column after a blank line, and runs until a non-blank line
+      -- dedents. Without this, a code sample such as "    {timeout: 30}"
+      -- reads as a Markua attribute list and gets rewritten -- the same
+      -- corruption fences protect against.
       if indented then
         if blank then
           record.in_code = true          -- blank lines do not end the block
-        elseif indent_columns(line) >= 4 then
+        elseif relative >= 4 then
           record.in_code = true
         else
           indented = false
         end
-      elseif prev_blank and not blank and indent_columns(line) >= 4 then
+      elseif prev_blank and not blank and relative >= 4 then
         indented = true
         record.in_code = true
       end
     end
 
     prev_blank = blank
-
-    lines[#lines + 1] = record
   end
 
-  return lines
+  -- A fence still open at the end of the document never closed, so under this
+  -- reader's target format (markdown_strict plus extensions, not commonmark)
+  -- its delimiter was ordinary text all along. commonmark would run the block
+  -- to EOF instead; following the format actually handed to pandoc.read is
+  -- what keeps the scanner's answer and pandoc's the same.
+  if open_marker then
+    reclassify(records, facts, open_index, number)
+  end
+
+  return records
 end
 
 return M
@@ -850,7 +1076,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/scanner_spec.lua`
-Expected: PASS, 17 successes
+Expected: PASS, 28 successes
 
 - [ ] **Step 5: Commit**
 
@@ -1044,6 +1270,37 @@ describe("attributes.to_pandoc_attr name representability", function()
   it("accepts the punctuation pandoc does accept, including a leading digit", function()
     local a = attributes.parse("{#3things, .with-dash, .with_us, .with.dot}", "f.md", 1)
     assert.equals("{#3things .with-dash .with_us .with.dot}", attributes.to_pandoc_attr(a))
+  end)
+end)
+
+describe("attributes.parse duplicate keys", function()
+  it("keeps the last occurrence of a repeated key", function()
+    -- Last-wins is what the keyvals table gives; pin it so the behavior is a
+    -- decision rather than an accident a later refactor could flip.
+    local a = attributes.parse('{title: "first", title: "second"}', "f.md", 1)
+    assert.equals("second", a.keyvals["title"])
+  end)
+
+  it("accumulates repeated class keys rather than replacing them", function()
+    local a = attributes.parse("{class: tip, class: wide}", "f.md", 1)
+    assert.same({ "tip", "wide" }, a.classes)
+  end)
+end)
+
+describe("attributes parse-to-emit composition", function()
+  it("double-escapes a source escape when parse is chained into to_pandoc_attr", function()
+    -- Pins the documented trap: parse yields Markua-level text with the
+    -- escape intact, to_pandoc_attr escapes what it is given, so chaining
+    -- them without an unescape step produces a doubled backslash. Whichever
+    -- consumer first needs the round trip owns that step.
+    local parsed = attributes.parse('{title: "a \\"b\\""}', "f.md", 1)
+    assert.equals('a \\"b\\"', parsed.keyvals["title"])
+    assert.equals([[{title="a \\\"b\\\""}]], attributes.to_pandoc_attr(parsed))
+  end)
+
+  it("round-trips a semantic value that carries no source escape", function()
+    local parsed = attributes.parse('{title: "Chapter 3"}', "f.md", 1)
+    assert.equals('{title="Chapter 3"}', attributes.to_pandoc_attr(parsed))
   end)
 end)
 ```
@@ -1263,7 +1520,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/attributes_spec.lua`
-Expected: PASS, 21 successes
+Expected: PASS, 25 successes
 
 - [ ] **Step 5: Commit**
 
@@ -2626,6 +2883,16 @@ git commit -m "feat: lower index spans to Word XE index fields"
 **Files:**
 
 - Create: `src/filters/index-latex.lua`, `src/filters/index-docbook.lua`
+
+**Carried in from the Task 2/3 review — this task owns it.** XML types `xml:id`
+as an `NCName`, which may not begin with a digit, so `{#3things}` is a valid id
+for pandoc, HTML and LaTeX but invalid in DocBook and EPUB. pandoc's own DocBook
+writer passes such an id through unsanitized, so this is upstream behavior rather
+than something the reader introduces, and `attributes.lua` cannot decide it: the
+parser does not know the output format. The DocBook filter does. Decide here
+whether to sanitize the id, warn, or document it as an authoring constraint --
+and note that rejecting it outright would refuse documents the other three
+writers handle correctly.
 
 **Interfaces:**
 

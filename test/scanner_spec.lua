@@ -146,10 +146,14 @@ describe("scanner", function()
     assert.equals("close", longer[3].fence)
     assert.is_false(longer[4].in_code)
 
+    -- A shorter delimiter does not close, so this fence never closes -- and
+    -- an unclosed fence is not a fence under the reader's target format, so
+    -- the whole run reverts to prose. Verified: pandoc parses this as one
+    -- Para containing inline Code, not a CodeBlock.
     local shorter = scanner.scan("````\ncode\n```\nafter")
     assert.is_nil(shorter[3].fence)
-    assert.is_true(shorter[3].in_code)
-    assert.is_true(shorter[4].in_code)
+    assert.is_false(shorter[3].in_code)
+    assert.is_false(shorter[4].in_code)
   end)
 
   it("does not close an open fence when the delimiter carries an info string", function()
@@ -161,10 +165,97 @@ describe("scanner", function()
     assert.is_false(lines[6].in_code)
   end)
 
-  it("leaves every remaining line in_code when a fence is never closed", function()
+  it("treats a fence that never closes as prose, not code", function()
+    -- markdown_strict and its extensions -- the format the reader hands to
+    -- pandoc.read -- require a fence to close before it is a fence at all;
+    -- an unclosed one is literal text. commonmark and gfm instead run the
+    -- block to EOF. Following the target format is what keeps this scanner's
+    -- answer and pandoc's identical, which is the module's whole job.
     local lines = scanner.scan("```\na\nb\nc")
-    for i = 2, #lines do
-      assert.is_true(lines[i].in_code)
+    for i = 1, #lines do
+      assert.is_false(lines[i].in_code)
     end
+    assert.is_nil(lines[1].fence)
+  end)
+
+  it("reverts an unclosed fence inside a blockquote when the quote ends", function()
+    local lines = scanner.scan("> ```\n> quoted\n\nafter\n")
+    assert.is_false(lines[1].in_code)
+    assert.is_false(lines[2].in_code)
+    assert.is_false(lines[4].in_code)
+  end)
+end)
+
+-- Every expectation below is pandoc 3.10.1's own answer for the same input,
+-- taken under the exact format the reader hands to pandoc.read
+-- (markdown_strict plus its extensions) rather than reasoned from the spec.
+-- The scanner exists to predict what pandoc will treat as code, so a
+-- disagreement here is a scanner bug by definition.
+describe("scanner container nesting", function()
+  it("sees a fenced block inside a blockquote", function()
+    local lines = scanner.scan('> ```python\n> {"k": 1}\n> ```\n\nafter\n')
+    assert.is_true(lines[1].in_code)
+    assert.equals("open", lines[1].fence)
+    assert.equals("python", lines[1].info)
+    assert.is_true(lines[2].in_code)
+    assert.equals("close", lines[3].fence)
+    assert.is_false(lines[5].in_code)
+  end)
+
+  it("sees an indented block inside a blockquote", function()
+    -- A bare ">" is the blank line that opens the indented block.
+    local lines = scanner.scan("> para\n>\n>     sample\n\nafter\n")
+    assert.is_true(lines[3].in_code)
+    assert.is_false(lines[5].in_code)
+  end)
+
+  it("sees a fence nested two blockquotes deep", function()
+    local lines = scanner.scan("> > ```\n> > sample\n> > ```\n")
+    assert.is_true(lines[2].in_code)
+  end)
+
+  it("handles a blockquote marker with no space after it", function()
+    local lines = scanner.scan(">```\n>sample\n>```\n")
+    assert.is_true(lines[2].in_code)
+  end)
+
+  it("does not treat a four-space line under a numbered item as code", function()
+    -- "1. " puts content at column 3, so code needs column 7. Four spaces is
+    -- a lazy paragraph continuation -- and an attribute an author indents by
+    -- habit there must still be converted, not skipped as code.
+    local lines = scanner.scan("1. item one\n\n    {ix: \"term\"}\n\n2. item two\n")
+    assert.is_false(lines[3].in_code)
+  end)
+
+  it("treats an eight-space line under a numbered item as code", function()
+    local lines = scanner.scan("1. item one\n\n        sample\n\n2. item two\n")
+    assert.is_true(lines[3].in_code)
+  end)
+
+  it("measures a bullet item's content column too", function()
+    local indented = scanner.scan("- item\n\n      sample\n\n- two\n")
+    assert.is_true(indented[3].in_code)
+
+    local para = scanner.scan("- item\n\n  {ix: \"term\"}\n\n- two\n")
+    assert.is_false(para[3].in_code)
+  end)
+
+  it("keeps a fence aligned to a wide list marker a fence, info string and all", function()
+    -- "10. " puts content at column 4. Measuring from column 0 would reject
+    -- the delimiter as over-indented and silently drop the language.
+    local lines = scanner.scan("10. item ten\n\n    ```python\n    sample\n    ```\n")
+    assert.equals("open", lines[3].fence)
+    assert.equals("python", lines[3].info)
+    assert.is_true(lines[4].in_code)
+  end)
+
+  it("handles a fence inside a list inside a blockquote", function()
+    local lines = scanner.scan("> 1. item\n>\n>    ```\n>    sample\n>    ```\n")
+    assert.is_true(lines[4].in_code)
+  end)
+
+  it("resumes plain measurement after a blockquote ends", function()
+    local lines = scanner.scan("> quoted\n\n    sample\n")
+    assert.is_true(lines[3].in_code)
   end)
 end)
