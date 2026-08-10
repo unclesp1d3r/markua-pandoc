@@ -297,3 +297,36 @@ describe("scanner container-state isolation", function()
     assert.is_true(lines[4].in_code)
   end)
 end)
+
+describe("scanner tilde fences", function()
+  -- The Markua spec supports tildes as a fence delimiter: "You can also insert
+  -- an inline resource using three or more tildes (`~`) as the delimiter,
+  -- instead of the more typical backticks". pandoc only honours that with the
+  -- `fenced_code_blocks` extension, which the reader's TARGET_FORMAT must
+  -- therefore carry -- without it a legitimate ~~~ block parses as prose with
+  -- Subscript artifacts, and every writer renders it wrong.
+  it("treats a tilde fence as code, like a backtick fence", function()
+    local lines = scanner.scan("~~~python\nsample\n~~~\n\nafter\n")
+    assert.equals("open", lines[1].fence)
+    assert.equals("python", lines[1].info)
+    assert.is_true(lines[2].in_code)
+    assert.equals("close", lines[3].fence)
+    assert.is_false(lines[5].in_code)
+  end)
+
+  it("recognises a tilde fence inside a list item and a blockquote", function()
+    local list = scanner.scan("- item\n\n  ~~~lua\n  sample\n  ~~~\n")
+    assert.is_true(list[4].in_code)
+
+    local quoted = scanner.scan("> ~~~\n> sample\n> ~~~\n")
+    assert.is_true(quoted[2].in_code)
+  end)
+
+  it("does not let a backtick delimiter close a tilde fence", function()
+    local lines = scanner.scan("~~~text\n```\nstill code\n~~~\nout\n")
+    assert.is_true(lines[2].in_code)
+    assert.is_true(lines[3].in_code)
+    assert.equals("close", lines[4].fence)
+    assert.is_false(lines[5].in_code)
+  end)
+end)

@@ -124,6 +124,16 @@ what was run.
   and `café` is a legal id; matching that exactly would need a Unicode table in
   pure Lua, and erring toward acceptance keeps real author text working.
 
+- **`TARGET_FORMAT` must carry `fenced_code_blocks`.** The Markua spec allows a
+  tilde delimiter -- "You can also insert an inline resource using three or more
+  tildes (`~`) as the delimiter, instead of the more typical backticks" -- and
+  `backtick_code_blocks` alone does not enable it. Without the extension pandoc
+  parses a legitimate `~~~` block as a paragraph containing `Subscript`
+  artifacts, so the block renders as garbled prose in every writer while the
+  scanner correctly reports it as code. Verified against pandoc 3.10.1 both
+  ways. This is why the scanner's fence table and the reader's format list have
+  to be changed together.
+
 - **The scanner is measured against the reader's own target format, not
   CommonMark.** `pandoc.read` is called with `markdown_strict` plus the
   extension list above, and that dialect disagrees with CommonMark where it
@@ -879,6 +889,39 @@ describe("scanner container-state isolation", function()
     assert.is_true(lines[4].in_code)
   end)
 end)
+
+describe("scanner tilde fences", function()
+  -- The Markua spec supports tildes as a fence delimiter: "You can also insert
+  -- an inline resource using three or more tildes (`~`) as the delimiter,
+  -- instead of the more typical backticks". pandoc only honours that with the
+  -- `fenced_code_blocks` extension, which the reader's TARGET_FORMAT must
+  -- therefore carry -- without it a legitimate ~~~ block parses as prose with
+  -- Subscript artifacts, and every writer renders it wrong.
+  it("treats a tilde fence as code, like a backtick fence", function()
+    local lines = scanner.scan("~~~python\nsample\n~~~\n\nafter\n")
+    assert.equals("open", lines[1].fence)
+    assert.equals("python", lines[1].info)
+    assert.is_true(lines[2].in_code)
+    assert.equals("close", lines[3].fence)
+    assert.is_false(lines[5].in_code)
+  end)
+
+  it("recognises a tilde fence inside a list item and a blockquote", function()
+    local list = scanner.scan("- item\n\n  ~~~lua\n  sample\n  ~~~\n")
+    assert.is_true(list[4].in_code)
+
+    local quoted = scanner.scan("> ~~~\n> sample\n> ~~~\n")
+    assert.is_true(quoted[2].in_code)
+  end)
+
+  it("does not let a backtick delimiter close a tilde fence", function()
+    local lines = scanner.scan("~~~text\n```\nstill code\n~~~\nout\n")
+    assert.is_true(lines[2].in_code)
+    assert.is_true(lines[3].in_code)
+    assert.equals("close", lines[4].fence)
+    assert.is_false(lines[5].in_code)
+  end)
+end)
 ```
 
 - [ ] **Step 2: Run it to make sure it fails**
@@ -1170,7 +1213,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/scanner_spec.lua`
-Expected: PASS, 32 successes
+Expected: PASS, 35 successes
 
 - [ ] **Step 5: Commit**
 
@@ -1595,7 +1638,14 @@ function M.parse(text, file, line, sink)
     errors.raise(file, line, "not an attribute list: " .. t)
   end
 
-  local parsed = { id = nil, classes = {}, keyvals = {}, bare = {} }
+  -- Carry the source position on the table itself. `to_pandoc_attr` raises
+  -- for a name pandoc cannot read back, but it is called later and elsewhere
+  -- than `parse`, so relying on every consumer to rethread file/line across
+  -- that gap loses the position exactly where the error needs it -- the two
+  -- draft consumers in docs/plan.md (Tasks 5 and 7) already call
+  -- `to_pandoc_attr(pending)` with no position, which would report
+  -- `nil:nil: id "..." cannot be represented` to an author.
+  local parsed = { id = nil, classes = {}, keyvals = {}, bare = {}, file = file, line = line }
   local seen_keys = {}
 
   for _, field in ipairs(split_fields(body)) do
@@ -1726,6 +1776,10 @@ end
 --- `file` and `line` are optional and only position the error raised when an
 --- id or class cannot be represented.
 function M.to_pandoc_attr(parsed, file, line)
+  -- Fall back to the position parse recorded, so a caller that omits these
+  -- still produces an error naming the author's file and line.
+  file = file or parsed.file
+  line = line or parsed.line
   local parts = {}
   if parsed.id then
     check_name("id", parsed.id, file, line)
@@ -2894,7 +2948,7 @@ local TARGET_FORMAT = table.concat({
   "fenced_divs", "bracketed_spans", "header_attributes",
   "pipe_tables", "footnotes", "definition_lists",
   "strikeout", "superscript", "subscript",
-  "tex_math_dollars", "backtick_code_blocks", "fenced_code_attributes",
+  "tex_math_dollars", "backtick_code_blocks", "fenced_code_blocks", "fenced_code_attributes",
   "link_attributes", "smart",
 }, "+")
 

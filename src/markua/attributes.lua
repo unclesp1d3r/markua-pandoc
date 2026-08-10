@@ -106,7 +106,14 @@ function M.parse(text, file, line, sink)
     errors.raise(file, line, "not an attribute list: " .. t)
   end
 
-  local parsed = { id = nil, classes = {}, keyvals = {}, bare = {} }
+  -- Carry the source position on the table itself. `to_pandoc_attr` raises
+  -- for a name pandoc cannot read back, but it is called later and elsewhere
+  -- than `parse`, so relying on every consumer to rethread file/line across
+  -- that gap loses the position exactly where the error needs it -- the two
+  -- draft consumers in docs/plan.md (Tasks 5 and 7) already call
+  -- `to_pandoc_attr(pending)` with no position, which would report
+  -- `nil:nil: id "..." cannot be represented` to an author.
+  local parsed = { id = nil, classes = {}, keyvals = {}, bare = {}, file = file, line = line }
   local seen_keys = {}
 
   for _, field in ipairs(split_fields(body)) do
@@ -237,6 +244,10 @@ end
 --- `file` and `line` are optional and only position the error raised when an
 --- id or class cannot be represented.
 function M.to_pandoc_attr(parsed, file, line)
+  -- Fall back to the position parse recorded, so a caller that omits these
+  -- still produces an error naming the author's file and line.
+  file = file or parsed.file
+  line = line or parsed.line
   local parts = {}
   if parsed.id then
     check_name("id", parsed.id, file, line)
