@@ -128,8 +128,13 @@ function M.parse(text, file, line, sink)
           -- governs it too: a repeated class: does not accumulate. The
           -- classes list exists for the `.name` shortcut, which is a
           -- different syntax.
+          -- pandoc splits a class value on whitespace
+          -- ("class" -> cs ++ T.words val in keyValAttr), so `{class: "tip
+          -- wide"}` is two classes rather than one unrepresentable name.
           seen_keys[key] = true
-          parsed.classes[#parsed.classes + 1] = value
+          for word in value:gmatch("%S+") do
+            parsed.classes[#parsed.classes + 1] = word
+          end
         else
           seen_keys[key] = true
           parsed.keyvals[key] = value
@@ -160,38 +165,70 @@ function M.parse(text, file, line, sink)
   return parsed
 end
 
--- Backslash-escape a value for pandoc's attribute syntax. `\` is escaped
--- first, then `"`. Escaping `"` first would double-escape the backslashes
--- that pass introduces: e.g. a literal `"` would become `\"`, and then the
--- `\` pass would turn that into `\\"` instead of the intended `\"`. Verified
--- against pandoc 3.10.1 (KTD4): title="He said \"hi\"" parses back to the
--- value `He said "hi"`, while an unescaped `"` does not degrade gracefully --
--- pandoc abandons the whole construct and renders the `:::` delimiters as
--- literal paragraph text.
--- Escapes a semantic value for pandoc's attribute syntax. Backslash first:
--- escaping the quote first would double-escape the backslashes that pass
--- introduces. Expects already-unescaped text, not `parse`'s raw keyvals --
--- see the composition note at the top of this file.
-local function escape_value(v)
-  v = v:gsub("\\", "\\\\")
-  v = v:gsub('"', '\\"')
-  return v
+-- Render a value for pandoc's attribute syntax, choosing the quote character
+-- the way pandoc's keyValAttr can actually read back:
+--
+--   val <- enclosed (char '"')  (char '"')  litChar
+--      <|> enclosed (char '\'') (char '\'') litChar
+--      <|> ...
+--
+-- The reader's target format is markdown_strict plus extensions, which leaves
+-- all_symbols_escapable OFF, so only original Markdown's escapable set works.
+-- A backslash is in that set; a double quote is not. Verified against pandoc
+-- 3.10.1 under that exact format: {title="He said \"hi\""} does not parse --
+-- pandoc abandons the whole construct and renders the ::: delimiters as
+-- literal paragraph text -- while {title='He said "hi"'} parses to the value
+-- `He said "hi"`. Escaping the quote is what -f markdown accepts; measuring
+-- the format actually handed to pandoc.read is what caught the difference.
+--
+-- So the quote character carries the value instead of an escape: single
+-- quotes when it contains a double quote, double quotes otherwise. A value
+-- containing both is unrepresentable here and is a hard error rather than
+-- silent corruption.
+local function escape_backslashes(v)
+  return (v:gsub("\\", "\\\\"))
+end
+
+local function render_value(v, file, line)
+  local has_double, has_single = v:find('"', 1, true), v:find("'", 1, true)
+  if has_double and has_single then
+    errors.raise(file, line,
+      "attribute value carries both a single and a double quote, which pandoc's attribute syntax cannot express: " .. v)
+  end
+  local body = escape_backslashes(v)
+  if has_double then
+    return "'" .. body .. "'"
+  end
+  return '"' .. body .. '"'
 end
 
 -- An id or class has no escape syntax in pandoc's attribute block -- unlike a
--- value, which quotes and backslashes can always carry. Measured against
--- pandoc 3.10.1: `-`, `_`, `.` and even a leading digit are fine, but
--- whitespace, a `"`, a brace, or an empty name makes pandoc reject the entire
--- attribute block and render it as literal text, so `{#my id .a class}` does
--- not merely lose the id -- it leaks the braces into the prose and drops the
--- class too. That is exactly the "never pass through as literal braces into
--- the output" failure AGENTS.md forbids, so this is a hard error naming the
--- offending name rather than a silent sanitize that would rewrite an anchor
--- the author cross-references elsewhere.
-local UNREPRESENTABLE = '[%s"{}]'
+-- value, which quotes and backslashes can always carry. The accepted shapes
+-- are pandoc's own, from Readers/Markdown.hs:
+--
+--   identifierAttr = char '#' >> many1 (alphaNum <|> oneOf "-_:.")
+--   identifier     = letter >> many (alphaNum <|> oneOf "-_:.")   -- class
+--
+-- So an id may start with a digit but a class may not, and neither may contain
+-- anything else. Emitting a name outside that grammar does not merely lose the
+-- name: pandoc rejects the *entire* attribute block and renders it as literal
+-- text, so `{#a&b .3things}` leaks braces into the prose and drops every other
+-- attribute with it -- the "never pass through as literal braces into the
+-- output" failure AGENTS.md forbids. Verified against pandoc 3.10.1: `{#a&b}`,
+-- `{#a%b}` and `{.3things}` all come back as literal Str, while `{#3things}`,
+-- `{#a:b}`, `{#a.b}` and `{#caf\233}` parse.
+--
+-- Bytes >= 0x80 are accepted as name characters. pandoc's alphaNum is Unicode
+-- aware, so `café` and CJK ids are legal there; matching that exactly would
+-- mean a Unicode character-class table in pure Lua. Accepting the high range
+-- errs toward passing real author text through rather than falsely rejecting
+-- it, at the cost of not catching an exotic non-alphanumeric symbol.
+local ID_PATTERN = "^[%w%-_:.\128-\255]+$"
+local CLASS_PATTERN = "^[%a\128-\255][%w%-_:.\128-\255]*$"
 
 local function check_name(kind, name, file, line)
-  if name == "" or name:find(UNREPRESENTABLE) then
+  local pattern = kind == "class" and CLASS_PATTERN or ID_PATTERN
+  if not name:match(pattern) then
     errors.raise(file, line, string.format("%s %q cannot be represented in a pandoc attribute", kind, name))
   end
 end
@@ -218,7 +255,7 @@ function M.to_pandoc_attr(parsed, file, line)
   end
   table.sort(keys)
   for _, k in ipairs(keys) do
-    parts[#parts + 1] = string.format('%s="%s"', k, escape_value(parsed.keyvals[k]))
+    parts[#parts + 1] = string.format("%s=%s", k, render_value(parsed.keyvals[k], file, line))
   end
   return "{" .. table.concat(parts, " ") .. "}"
 end

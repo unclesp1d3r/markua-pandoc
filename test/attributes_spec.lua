@@ -54,13 +54,27 @@ describe("attributes.to_pandoc_attr", function()
     assert.equals('{#x .tip title="A B"}', attributes.to_pandoc_attr(a))
   end)
 
-  it("backslash-escapes a quote in a value so pandoc parses it back intact (KTD4)", function()
-    -- Verified against pandoc 3.10.1: title="He said \"hi\"" parses to the
-    -- value `He said "hi"`. The unescaped form does not degrade to a wrong
-    -- title -- pandoc abandons the whole construct and renders the `:::`
-    -- delimiters as literal paragraph text.
+  it("single-quotes a value containing a double quote (KTD4)", function()
+    -- The reader's target format is markdown_strict plus extensions, which
+    -- leaves all_symbols_escapable off, so `\"` is NOT an escape there and
+    -- {title="He said \"hi\""} fails to parse -- pandoc abandons the whole
+    -- construct and renders the ::: delimiters as literal text. Verified
+    -- against pandoc 3.10.1 under that exact format: the single-quoted form
+    -- parses back to the value `He said "hi"`.
     local a = { id = nil, classes = {}, keyvals = { title = 'He said "hi"' }, bare = {} }
-    assert.equals('{title="He said \\"hi\\""}', attributes.to_pandoc_attr(a))
+    assert.equals([[{title='He said "hi"'}]], attributes.to_pandoc_attr(a))
+  end)
+
+  it("keeps double quotes for a value containing only an apostrophe", function()
+    local a = { id = nil, classes = {}, keyvals = { title = "it's" }, bare = {} }
+    assert.equals([[{title="it's"}]], attributes.to_pandoc_attr(a))
+  end)
+
+  it("raises for a value carrying both quote characters", function()
+    -- Neither quoting style can enclose it and no escape is available, so
+    -- this is unrepresentable rather than silently corrupted.
+    local a = { id = nil, classes = {}, keyvals = { title = [[He said "hi" and it's]] }, bare = {} }
+    assert.is_false(pcall(attributes.to_pandoc_attr, a, "f.md", 3))
   end)
 
   it("escapes a backslash in a value (KTD4)", function()
@@ -162,6 +176,42 @@ describe("attributes.to_pandoc_attr name representability", function()
     local a = attributes.parse("{#3things, .with-dash, .with_us, .with.dot}", "f.md", 1)
     assert.equals("{#3things .with-dash .with_us .with.dot}", attributes.to_pandoc_attr(a))
   end)
+
+  -- The accepted shapes are pandoc's own grammar, from Readers/Markdown.hs:
+  --   identifierAttr = char '#' >> many1 (alphaNum <|> oneOf "-_:.")
+  --   identifier     = letter >> many (alphaNum <|> oneOf "-_:.")   -- class
+  -- An id may therefore start with a digit or a dash; a class may not.
+  it("rejects a class beginning with a digit, which pandoc will not parse", function()
+    local a = { id = nil, classes = { "3things" }, keyvals = {}, bare = {} }
+    assert.is_false(pcall(attributes.to_pandoc_attr, a, "f.md", 1))
+  end)
+
+  it("rejects a name carrying punctuation outside pandoc's set", function()
+    for _, name in ipairs({ "a&b", "a%b", "a#b", "a<b>c" }) do
+      local a = { id = name, classes = {}, keyvals = {}, bare = {} }
+      assert.is_false(pcall(attributes.to_pandoc_attr, a, "f.md", 1),
+        "expected " .. name .. " to be rejected as an id")
+    end
+  end)
+
+  it("accepts colon, dot and a leading dash in an id", function()
+    local a = { id = "a:b.c", classes = {}, keyvals = {}, bare = {} }
+    assert.equals("{#a:b.c}", attributes.to_pandoc_attr(a))
+    local dashed = { id = "--x", classes = {}, keyvals = {}, bare = {} }
+    assert.equals("{#--x}", attributes.to_pandoc_attr(dashed))
+  end)
+
+  it("accepts a non-ASCII name, which pandoc's Unicode alphaNum allows", function()
+    local a = { id = "caf\195\169", classes = { "na\195\175ve" }, keyvals = {}, bare = {} }
+    assert.equals("{#caf\195\169 .na\195\175ve}", attributes.to_pandoc_attr(a))
+  end)
+
+  it("splits a class value on whitespace the way pandoc does", function()
+    -- pandoc's keyValAttr: "class" -> cs ++ T.words val
+    local a = attributes.parse('{class: "tip wide"}', "f.md", 1)
+    assert.same({ "tip", "wide" }, a.classes)
+    assert.equals("{.tip .wide}", attributes.to_pandoc_attr(a))
+  end)
 end)
 
 describe("attributes.parse duplicate keys", function()
@@ -206,14 +256,15 @@ describe("attributes.parse duplicate keys", function()
 end)
 
 describe("attributes parse-to-emit composition", function()
-  it("double-escapes a source escape when parse is chained into to_pandoc_attr", function()
-    -- Pins the documented trap: parse yields Markua-level text with the
-    -- escape intact, to_pandoc_attr escapes what it is given, so chaining
-    -- them without an unescape step produces a doubled backslash. Whichever
-    -- consumer first needs the round trip owns that step.
+  it("still shows the composition trap when parse is chained into to_pandoc_attr", function()
+    -- parse yields Markua-level text with the source escape intact, and
+    -- to_pandoc_attr renders what it is given, so chaining them without an
+    -- unescape step carries the backslashes through. Whichever consumer
+    -- first needs the round trip owns that step.
     local parsed = attributes.parse('{title: "a \\"b\\""}', "f.md", 1)
     assert.equals('a \\"b\\"', parsed.keyvals["title"])
-    assert.equals([[{title="a \\\"b\\\""}]], attributes.to_pandoc_attr(parsed))
+    -- The value contains a double quote, so it emits single-quoted.
+    assert.equals([[{title='a \\"b\\"'}]], attributes.to_pandoc_attr(parsed))
   end)
 
   it("round-trips a semantic value that carries no source escape", function()

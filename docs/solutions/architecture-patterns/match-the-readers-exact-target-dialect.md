@@ -79,11 +79,41 @@ The scanner's failure mode is silent in both directions:
 Neither raises an error, and neither is visible without comparing against the
 parser that actually consumes the output.
 
+## The mistake repeats itself
+
+This lesson was written after the unclosed-fence divergence, and then the same
+error was made again in the same session, on the writer side. `to_pandoc_attr`
+backslash-escaped a double quote in an attribute value, verified against
+`pandoc -f markdown`. Under `markdown_strict` -- the format the reader actually
+uses -- `all_symbols_escapable` is off, `\"` is not an escape, and pandoc
+rejects the whole attribute block, leaking the `:::` delimiters into the prose.
+Every book with a quoted title would have been affected.
+
+Two things generalize:
+
+- **`-f markdown` is not the target.** It is pandoc's permissive default and
+  accepts constructs `markdown_strict` rejects. Reach for the reader's own
+  format string every time, including when checking something that "obviously"
+  works.
+- **Check the output boundary, not just the input.** The first version of this
+  document only covered the scanner, which reads. The writer side has the same
+  exposure and a worse failure mode: a bad emission corrupts the document
+  silently in every output format at once.
+
+The general check is end-to-end: generate the construct with the module itself,
+run it through every target writer, and assert both that the construct survives
+into the AST -- not as literal text -- and that the binary formats stay
+well-formed.
+
 ## When to Apply
 
 - Any claim about what pandoc does with generated markdown. Run it, with the
   reader's own format string.
 - Any transform that must skip code, especially one measuring indentation.
+- Any value, id, or class the reader *emits* into generated markdown. Read the
+  grammar in `Readers/Markdown.hs` rather than inferring it: an id is
+  `many1 (alphaNum <|> oneOf "-_:.")`, a class is `letter` then the same set,
+  and a value is carried by its quote character.
 - Any expectation copied from the CommonMark spec — check the dialect first;
   the spec is the wrong authority when the target is `markdown_strict`.
 
