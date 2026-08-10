@@ -52,11 +52,31 @@ end
 -- `"She said \"hi` and inventing a spurious bare word `there\""`. This is
 -- tokenizing only -- the backslash stays in the field text verbatim; `parse`
 -- does not unescape it.
+--
+-- A quote that never closes does not delimit anything, so quote state is
+-- disabled for the whole body rather than left stuck on. Without this,
+-- `{title: "abc, class: tip}` swallows the following field: the comma stops
+-- separating and `class: tip` disappears into the title with no error. This
+-- follows pandoc, which recovers the same way -- `{#h title="abc class=tip}`
+-- yields the value `"abc` AND still applies the class `tip`, keeping the
+-- stray quote literally rather than rejecting the document. Erroring instead
+-- would refuse input that parses correctly today, such as `{title: 5" pipe}`.
+local function has_balanced_quotes(body)
+  local open = false
+  for i = 1, #body do
+    if body:sub(i, i) == '"' and backslash_run_length(body, i) % 2 == 0 then
+      open = not open
+    end
+  end
+  return not open
+end
+
 local function split_fields(body)
+  local quotes_delimit = has_balanced_quotes(body)
   local fields, buf, in_quote = {}, {}, false
   for i = 1, #body do
     local c = body:sub(i, i)
-    if c == '"' and backslash_run_length(body, i) % 2 == 0 then
+    if c == '"' and quotes_delimit and backslash_run_length(body, i) % 2 == 0 then
       in_quote = not in_quote
       buf[#buf + 1] = c
     elseif c == "," and not in_quote then
@@ -132,12 +152,35 @@ local function escape_value(v)
   return v
 end
 
-function M.to_pandoc_attr(parsed)
+-- An id or class has no escape syntax in pandoc's attribute block -- unlike a
+-- value, which quotes and backslashes can always carry. Measured against
+-- pandoc 3.10.1: `-`, `_`, `.` and even a leading digit are fine, but
+-- whitespace, a `"`, a brace, or an empty name makes pandoc reject the entire
+-- attribute block and render it as literal text, so `{#my id .a class}` does
+-- not merely lose the id -- it leaks the braces into the prose and drops the
+-- class too. That is exactly the "never pass through as literal braces into
+-- the output" failure AGENTS.md forbids, so this is a hard error naming the
+-- offending name rather than a silent sanitize that would rewrite an anchor
+-- the author cross-references elsewhere.
+local UNREPRESENTABLE = '[%s"{}]'
+
+local function check_name(kind, name, file, line)
+  if name == "" or name:find(UNREPRESENTABLE) then
+    errors.raise(file, line, string.format("%s %q cannot be represented in a pandoc attribute", kind, name))
+  end
+end
+
+--- Render a parsed attribute list as a pandoc attribute block.
+--- `file` and `line` are optional and only position the error raised when an
+--- id or class cannot be represented.
+function M.to_pandoc_attr(parsed, file, line)
   local parts = {}
   if parsed.id then
+    check_name("id", parsed.id, file, line)
     parts[#parts + 1] = "#" .. parsed.id
   end
   for _, c in ipairs(parsed.classes) do
+    check_name("class", c, file, line)
     parts[#parts + 1] = "." .. c
   end
   -- Sorted keys are the determinism mechanism for R18: iterating pairs()

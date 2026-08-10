@@ -104,6 +104,32 @@ what was run.
   `:::` delimiters as literal paragraph text, losing the whole block. Escaping
   the quote first would double-escape the backslashes that pass introduces.
 
+- **Parse permissively, emit strictly.** The two ends of this module answer to
+  different traditions, and conflating them produced two bugs. Markua is a
+  markdown dialect, and markdown has no such thing as a parse error, so `parse`
+  recovers rather than rejecting: an unclosed quote stops delimiting, staying
+  literal in the value while the following field still parses. That is measured
+  pandoc behavior -- `{#h title="abc class=tip}` yields the value `"abc` *and*
+  still applies the class `tip` -- and it fixes the silent field loss without a
+  rule about which malformed input is illegal. Erroring instead would refuse
+  `{title: 5" pipe}`, which parses correctly today. The output end faces XML's
+  opposite rule, since DocBook and EPUB treat malformed markup as fatal, so
+  `to_pandoc_attr` refuses to emit anything pandoc cannot read back. *(Rejected:
+  raising on an unterminated quote, which needs a quote-opening rule Markua does
+  not define and rejects input that works; and sanitizing an unsafe id, which
+  silently rewrites an anchor the author cross-references elsewhere.)*
+
+- **An unrepresentable id or class is a hard error, not an escape problem.**
+  A value can always be carried by quoting and backslashes; an id or class
+  cannot -- pandoc's attribute syntax has no escape for them. Measured against
+  pandoc 3.10.1: `-`, `_`, `.` and a leading digit are accepted, while
+  whitespace, a `"`, a brace, or an empty name makes pandoc reject the *entire*
+  attribute block and render it as literal text. So `{#my id .a class}` does not
+  just lose the id -- it leaks braces into the prose and drops the class too,
+  the precise "never pass through as literal braces into the output" failure the
+  global constraints forbid. `to_pandoc_attr` raises through `errors`, naming
+  the offending id or class.
+
 - **`split_fields` tracks backslash parity when it toggles quote state.**
   Flipping on every `"` leaves the tokenizer mis-synchronized after an odd
   number of escaped quotes: `{title: "She said \"hi, there\""}` truncated to
@@ -973,6 +999,53 @@ describe("attributes.parse errors (R17)", function()
     assert.equals(7, err.line)
   end)
 end)
+
+describe("attributes.parse unterminated-quote recovery", function()
+  -- Follows pandoc: an unclosed quote does not delimit, so it stays literal in
+  -- the value and the following field still parses. Erroring instead would
+  -- refuse `{title: 5" pipe}`, which is valid today.
+  it("keeps the stray quote in the value and still separates the next field", function()
+    local a = attributes.parse('{title: "abc, class: tip}', "f.md", 1)
+    assert.equals('"abc', a.keyvals["title"])
+    assert.same({ "tip" }, a.classes)
+  end)
+
+  it("leaves a literal quote inside an unquoted value alone", function()
+    local a = attributes.parse('{title: 5" pipe}', "f.md", 1)
+    assert.equals('5" pipe', a.keyvals["title"])
+  end)
+
+  it("still groups a comma inside a balanced quoted value", function()
+    local a = attributes.parse('{ix: "B-tree, invention of"}', "f.md", 1)
+    assert.equals("B-tree, invention of", a.keyvals["ix"])
+    assert.same({}, a.bare)
+  end)
+end)
+
+describe("attributes.to_pandoc_attr name representability", function()
+  -- pandoc has no escape syntax for an id or class: whitespace, a quote, a
+  -- brace, or an empty name makes it reject the whole attribute block and
+  -- render it as literal braces -- the output AGENTS.md forbids.
+  it("raises with file and line for an id that pandoc cannot read back", function()
+    local parsed = attributes.parse("{#my id}", "f.md", 7)
+    local ok, err = pcall(attributes.to_pandoc_attr, parsed, "f.md", 7)
+    assert.is_false(ok)
+    assert.equals("f.md", err.file)
+    assert.equals(7, err.line)
+  end)
+
+  it("raises for a class that pandoc cannot read back", function()
+    local parsed = attributes.parse("{.a class}", "f.md", 9)
+    local ok, err = pcall(attributes.to_pandoc_attr, parsed, "f.md", 9)
+    assert.is_false(ok)
+    assert.equals(9, err.line)
+  end)
+
+  it("accepts the punctuation pandoc does accept, including a leading digit", function()
+    local a = attributes.parse("{#3things, .with-dash, .with_us, .with.dot}", "f.md", 1)
+    assert.equals("{#3things .with-dash .with_us .with.dot}", attributes.to_pandoc_attr(a))
+  end)
+end)
 ```
 
 - [ ] **Step 2: Run it to make sure it fails**
@@ -1039,11 +1112,31 @@ end
 -- `"She said \"hi` and inventing a spurious bare word `there\""`. This is
 -- tokenizing only -- the backslash stays in the field text verbatim; `parse`
 -- does not unescape it.
+--
+-- A quote that never closes does not delimit anything, so quote state is
+-- disabled for the whole body rather than left stuck on. Without this,
+-- `{title: "abc, class: tip}` swallows the following field: the comma stops
+-- separating and `class: tip` disappears into the title with no error. This
+-- follows pandoc, which recovers the same way -- `{#h title="abc class=tip}`
+-- yields the value `"abc` AND still applies the class `tip`, keeping the
+-- stray quote literally rather than rejecting the document. Erroring instead
+-- would refuse input that parses correctly today, such as `{title: 5" pipe}`.
+local function has_balanced_quotes(body)
+  local open = false
+  for i = 1, #body do
+    if body:sub(i, i) == '"' and backslash_run_length(body, i) % 2 == 0 then
+      open = not open
+    end
+  end
+  return not open
+end
+
 local function split_fields(body)
+  local quotes_delimit = has_balanced_quotes(body)
   local fields, buf, in_quote = {}, {}, false
   for i = 1, #body do
     local c = body:sub(i, i)
-    if c == '"' and backslash_run_length(body, i) % 2 == 0 then
+    if c == '"' and quotes_delimit and backslash_run_length(body, i) % 2 == 0 then
       in_quote = not in_quote
       buf[#buf + 1] = c
     elseif c == "," and not in_quote then
@@ -1119,12 +1212,35 @@ local function escape_value(v)
   return v
 end
 
-function M.to_pandoc_attr(parsed)
+-- An id or class has no escape syntax in pandoc's attribute block -- unlike a
+-- value, which quotes and backslashes can always carry. Measured against
+-- pandoc 3.10.1: `-`, `_`, `.` and even a leading digit are fine, but
+-- whitespace, a `"`, a brace, or an empty name makes pandoc reject the entire
+-- attribute block and render it as literal text, so `{#my id .a class}` does
+-- not merely lose the id -- it leaks the braces into the prose and drops the
+-- class too. That is exactly the "never pass through as literal braces into
+-- the output" failure AGENTS.md forbids, so this is a hard error naming the
+-- offending name rather than a silent sanitize that would rewrite an anchor
+-- the author cross-references elsewhere.
+local UNREPRESENTABLE = '[%s"{}]'
+
+local function check_name(kind, name, file, line)
+  if name == "" or name:find(UNREPRESENTABLE) then
+    errors.raise(file, line, string.format("%s %q cannot be represented in a pandoc attribute", kind, name))
+  end
+end
+
+--- Render a parsed attribute list as a pandoc attribute block.
+--- `file` and `line` are optional and only position the error raised when an
+--- id or class cannot be represented.
+function M.to_pandoc_attr(parsed, file, line)
   local parts = {}
   if parsed.id then
+    check_name("id", parsed.id, file, line)
     parts[#parts + 1] = "#" .. parsed.id
   end
   for _, c in ipairs(parsed.classes) do
+    check_name("class", c, file, line)
     parts[#parts + 1] = "." .. c
   end
   -- Sorted keys are the determinism mechanism for R18: iterating pairs()
@@ -1147,7 +1263,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/attributes_spec.lua`
-Expected: PASS, 15 successes
+Expected: PASS, 21 successes
 
 - [ ] **Step 5: Commit**
 

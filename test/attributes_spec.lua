@@ -116,3 +116,50 @@ describe("attributes.parse errors (R17)", function()
     assert.equals(7, err.line)
   end)
 end)
+
+describe("attributes.parse unterminated-quote recovery", function()
+  -- Follows pandoc: an unclosed quote does not delimit, so it stays literal in
+  -- the value and the following field still parses. Erroring instead would
+  -- refuse `{title: 5" pipe}`, which is valid today.
+  it("keeps the stray quote in the value and still separates the next field", function()
+    local a = attributes.parse('{title: "abc, class: tip}', "f.md", 1)
+    assert.equals('"abc', a.keyvals["title"])
+    assert.same({ "tip" }, a.classes)
+  end)
+
+  it("leaves a literal quote inside an unquoted value alone", function()
+    local a = attributes.parse('{title: 5" pipe}', "f.md", 1)
+    assert.equals('5" pipe', a.keyvals["title"])
+  end)
+
+  it("still groups a comma inside a balanced quoted value", function()
+    local a = attributes.parse('{ix: "B-tree, invention of"}', "f.md", 1)
+    assert.equals("B-tree, invention of", a.keyvals["ix"])
+    assert.same({}, a.bare)
+  end)
+end)
+
+describe("attributes.to_pandoc_attr name representability", function()
+  -- pandoc has no escape syntax for an id or class: whitespace, a quote, a
+  -- brace, or an empty name makes it reject the whole attribute block and
+  -- render it as literal braces -- the output AGENTS.md forbids.
+  it("raises with file and line for an id that pandoc cannot read back", function()
+    local parsed = attributes.parse("{#my id}", "f.md", 7)
+    local ok, err = pcall(attributes.to_pandoc_attr, parsed, "f.md", 7)
+    assert.is_false(ok)
+    assert.equals("f.md", err.file)
+    assert.equals(7, err.line)
+  end)
+
+  it("raises for a class that pandoc cannot read back", function()
+    local parsed = attributes.parse("{.a class}", "f.md", 9)
+    local ok, err = pcall(attributes.to_pandoc_attr, parsed, "f.md", 9)
+    assert.is_false(ok)
+    assert.equals(9, err.line)
+  end)
+
+  it("accepts the punctuation pandoc does accept, including a leading digit", function()
+    local a = attributes.parse("{#3things, .with-dash, .with_us, .with.dot}", "f.md", 1)
+    assert.equals("{#3things .with-dash .with_us .with.dot}", attributes.to_pandoc_attr(a))
+  end)
+end)

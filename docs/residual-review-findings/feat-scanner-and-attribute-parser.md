@@ -4,10 +4,12 @@ Branch: `feat/scanner-and-attribute-parser`
 Plan: `docs/plans/2026-08-09-001-feat-scanner-and-attribute-parser-plan.md`
 Recorded: 2026-08-09
 
-Findings from the code review of Phase 1 (Tasks 2 and 3) that were **not** applied
-on this branch, with the evidence that produced them. Every one was reproduced by
-execution against pandoc 3.10.1, per
-`docs/solutions/conventions/execute-dont-read-when-reviewing-plans.md`.
+Findings from the code review of Phase 1 (Tasks 2 and 3), with the evidence that
+produced them. Every one was reproduced by execution against pandoc 3.10.1, per
+`docs/solutions/conventions/execute-dont-read-when-reviewing-plans.md`. Most are
+open; the two under "Resolved after review" were fixed on this branch once that
+same discipline was applied to the *decision* rather than only the finding, and
+are kept because the reasoning transfers.
 
 ## The scanner has no notion of container nesting
 
@@ -40,42 +42,51 @@ about container prefixes, which changes R6 and R7 and deserves its own unit.
   `info` are never set, so the language pandoc attaches to the block is lost to
   any consumer reading `record.info`.
 
-## An unterminated quoted attribute value silently swallows the next field
+## Resolved after review: attribute-value recovery and name representability
 
-**P1.** `split_fields` never checks whether `in_quote` is still true at the end of
-the body, and `unquote` simply fails to match when there is no closing quote.
-`attributes.parse('{title: "abc, class: tip}')` yields
-`keyvals.title == '"abc, class: tip'` — the stray quote is kept literally and the
-`class: tip` attribute vanishes with no error, even though `AGENTS.md` requires
-unrecognized constructs to hard-error. For a blurb or aside, the `class:` that
-controls rendering disappears silently.
+Both items below started as residuals and were fixed on this branch after
+checking what the surrounding formats actually do. They are kept here because
+the reasoning is the useful part.
 
-**Why it was not applied.** The obvious fix — raise when `in_quote` is still true
-at the end — also rejects input that parses correctly today. A value with a
-literal quote in it, such as `{title: 5" pipe}`, currently yields `5" pipe` and
-would begin aborting the build. Distinguishing "quote opens a quoted value" from
-"quote is a literal character mid-value" needs a rule about where a quote may
-appear, which is a Markua-spec decision rather than a mechanical fix. Rejecting
-manuscripts that work today is worse than the current silent swallow, so this is
-routed to the author rather than guessed at.
+**The unterminated quoted value no longer swallows the next field.** It did:
+`attributes.parse('{title: "abc, class: tip}')` merged everything into the title
+and `class: tip` vanished silently. The fix was not the obvious one. Raising when
+the quote never closes would also reject `{title: 5" pipe}`, which parses
+correctly today, so it looked like it needed a Markua-spec ruling on what opens a
+quoted value. Measuring pandoc dissolved the question: pandoc never errors here.
+`{#h title="abc class=tip}` yields the value `"abc` *and* still applies the class
+`tip` — an unclosed quote simply stops delimiting. `split_fields` now recovers
+the same way, which ends the data loss and keeps every input that worked before.
+
+**An unrepresentable id or class is now a hard error.** `{#my id, .a class}`
+re-emitted as `{#my id .a class}`, and pandoc rejects that whole attribute block
+and renders it as literal text — leaking braces into the prose and dropping the
+class as well as the id. Values can always be carried by escaping; ids and
+classes have no escape syntax at all, so `to_pandoc_attr` raises through `errors`
+naming the offending name. Sanitizing was rejected: it would silently rewrite an
+anchor the author cross-references elsewhere.
+
+The split those two produced — parse permissively, emit strictly — is recorded as
+a Key Technical Decision in `docs/plan.md`. It follows the formats on each side:
+markdown never fails to parse, while DocBook and EPUB treat malformed markup as
+fatal.
 
 ## Testing gaps
 
 - No scanner coverage for code nested in a blockquote or a list item (the gaps
   above have no regression test either way).
-- No attribute-parser test for an unterminated quoted value, or for duplicate
-  keys in one attribute list (current behavior is last-wins, untested).
+- No attribute-parser test for duplicate keys in one attribute list (current
+  behavior is last-wins, untested).
 - No test composes `parse` into `to_pandoc_attr` for an escape-bearing value. The
-  composition trap is now documented in `attributes.lua` but not pinned by a test,
-  because the correct composed output depends on the unresolved unescape decision
-  above.
-- `to_pandoc_attr` emits `id` and each class unescaped, so an id or class
-  containing a space or quote produces a syntactically broken attribute block.
-  This **is** reachable straight from `parse`: `{#my id, .a class}` yields
-  `id = "my id"` and a class of `a class`, which re-emit as `{#my id .a class}`.
-  Uncovered, and it stays reachable until either the parser validates shortcut
-  values or the writer escapes them — the same open question as the unterminated
-  quote above, since both turn on which malformed input the parser may reject.
+  composition trap is documented in `attributes.lua` but not pinned by a test,
+  because the correct composed output depends on where the unescape step lands —
+  still open, and owned by whichever consumer first needs the round trip.
+- An id that is representable for pandoc may still be invalid downstream: XML
+  types `xml:id` as an `NCName`, so a leading digit (`{#3things}`) is fine for
+  pandoc, HTML and LaTeX but not for DocBook or EPUB. pandoc's DocBook writer
+  passes such an id through unsanitized. Not guarded here, because pandoc itself
+  does not guard it and rejecting those ids would refuse documents the other
+  three writers handle correctly.
 
 ## Review context
 
