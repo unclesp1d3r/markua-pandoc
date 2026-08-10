@@ -395,3 +395,34 @@ describe("scanner boundary arithmetic", function()
     assert.is_false(para[3].in_code)
   end)
 end)
+
+describe("scanner list-start rules", function()
+  it("does not let a list marker interrupt an open paragraph", function()
+    -- pandoc reads "para" then "1. item" as one lazy paragraph, so no list
+    -- opens and the indented line after the blank is ordinary code. Treating
+    -- the marker as a list start hid that code block behind a phantom item.
+    local ordered = scanner.scan("para\n1. item\n\n    sample\n")
+    assert.is_true(ordered[4].in_code)
+
+    local bullet = scanner.scan("para\n- item\n\n    sample\n")
+    assert.is_true(bullet[4].in_code)
+  end)
+
+  it("still opens a list after a blank line or a heading", function()
+    local after_blank = scanner.scan("para\n\n1. item\n\n    {ix: \"term\"}\n")
+    assert.is_false(after_blank[5].in_code)
+
+    -- A list may follow a heading with no blank line, so the paragraph gate
+    -- must not key on blankness alone.
+    local after_heading = scanner.scan("# Heading\n- item\n\n      sample\n")
+    assert.is_true(after_heading[4].in_code)
+  end)
+
+  it("treats a thematic break as a rule, not a list item", function()
+    -- "- - -" matches the bullet pattern but pandoc emits HorizontalRule.
+    for _, rule in ipairs({ "- - -", "* * *", "___" }) do
+      local lines = scanner.scan("para\n\n" .. rule .. "\n\n    sample\n")
+      assert.is_true(lines[5].in_code, "expected code after " .. rule)
+    end
+  end)
+end)

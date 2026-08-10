@@ -130,7 +130,23 @@ end
 -- the tab-stop rule rather than counting bytes.
 local LIST_MARKERS = { "^([ \t]*)([-+*])([ \t]+)", "^([ \t]*)(%d+[.)])([ \t]+)" }
 
+-- A thematic break is not a list, even though "- - -" matches the bullet
+-- pattern. pandoc emits HorizontalRule for it, so treating it as a list start
+-- opened a phantom item whose content column then hid a real code block.
+local THEMATIC_CHARS = { ["-"] = true, ["*"] = true, ["_"] = true }
+
+local function is_thematic_break(rest)
+  local squeezed = rest:gsub("[ \t]", "")
+  if #squeezed < 3 or not THEMATIC_CHARS[squeezed:sub(1, 1)] then
+    return false
+  end
+  return squeezed:gsub("%" .. squeezed:sub(1, 1), "") == ""
+end
+
 local function list_content_column(rest)
+  if is_thematic_break(rest) then
+    return nil
+  end
   for _, pattern in ipairs(LIST_MARKERS) do
     local indent, marker, gap = rest:match(pattern)
     if indent then
@@ -177,6 +193,12 @@ function M.scan(text)
   -- made "10. outer" / "    - nested" / "    {ix: ...}" read as code, where
   -- pandoc keeps that last line a lazy continuation of the outer item.
   local list_stack = {}       -- { { column = n, depth = n }, ... }, innermost last
+  -- A list marker cannot interrupt an open paragraph in this dialect: pandoc
+  -- reads "para" then "1. item" as one lazy paragraph, so treating it as a
+  -- list start opened a phantom item whose content column then reported a
+  -- following indented code block as prose. Only a *top-level* open is gated;
+  -- nesting inside an already-open list is unaffected.
+  local in_paragraph = false
   local number = 0
 
   -- The "text .. \n" split (and the empty trailing record it produces for
@@ -215,6 +237,9 @@ function M.scan(text)
     local column = indent_columns(rest)
     if not blank and not open_marker then
       local started = list_content_column(rest)
+      if started and #list_stack == 0 and in_paragraph then
+        started = nil        -- a marker cannot interrupt an open paragraph
+      end
       if started and column <= list_column + 3 then
         list_stack[#list_stack + 1] = { column = started, depth = depth }
       elseif column < list_column then
@@ -281,6 +306,11 @@ function M.scan(text)
     end
 
     prev_blank = blank
+    if blank or record.in_code or is_thematic_break(rest) or rest:match("^#") then
+      in_paragraph = false
+    else
+      in_paragraph = true
+    end
   end
 
   -- A fence still open at the end of the document never closed, so under this

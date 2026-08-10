@@ -987,6 +987,37 @@ describe("scanner boundary arithmetic", function()
     assert.is_false(para[3].in_code)
   end)
 end)
+
+describe("scanner list-start rules", function()
+  it("does not let a list marker interrupt an open paragraph", function()
+    -- pandoc reads "para" then "1. item" as one lazy paragraph, so no list
+    -- opens and the indented line after the blank is ordinary code. Treating
+    -- the marker as a list start hid that code block behind a phantom item.
+    local ordered = scanner.scan("para\n1. item\n\n    sample\n")
+    assert.is_true(ordered[4].in_code)
+
+    local bullet = scanner.scan("para\n- item\n\n    sample\n")
+    assert.is_true(bullet[4].in_code)
+  end)
+
+  it("still opens a list after a blank line or a heading", function()
+    local after_blank = scanner.scan("para\n\n1. item\n\n    {ix: \"term\"}\n")
+    assert.is_false(after_blank[5].in_code)
+
+    -- A list may follow a heading with no blank line, so the paragraph gate
+    -- must not key on blankness alone.
+    local after_heading = scanner.scan("# Heading\n- item\n\n      sample\n")
+    assert.is_true(after_heading[4].in_code)
+  end)
+
+  it("treats a thematic break as a rule, not a list item", function()
+    -- "- - -" matches the bullet pattern but pandoc emits HorizontalRule.
+    for _, rule in ipairs({ "- - -", "* * *", "___" }) do
+      local lines = scanner.scan("para\n\n" .. rule .. "\n\n    sample\n")
+      assert.is_true(lines[5].in_code, "expected code after " .. rule)
+    end
+  end)
+end)
 ```
 
 - [ ] **Step 2: Run it to make sure it fails**
@@ -1131,7 +1162,23 @@ end
 -- the tab-stop rule rather than counting bytes.
 local LIST_MARKERS = { "^([ \t]*)([-+*])([ \t]+)", "^([ \t]*)(%d+[.)])([ \t]+)" }
 
+-- A thematic break is not a list, even though "- - -" matches the bullet
+-- pattern. pandoc emits HorizontalRule for it, so treating it as a list start
+-- opened a phantom item whose content column then hid a real code block.
+local THEMATIC_CHARS = { ["-"] = true, ["*"] = true, ["_"] = true }
+
+local function is_thematic_break(rest)
+  local squeezed = rest:gsub("[ \t]", "")
+  if #squeezed < 3 or not THEMATIC_CHARS[squeezed:sub(1, 1)] then
+    return false
+  end
+  return squeezed:gsub("%" .. squeezed:sub(1, 1), "") == ""
+end
+
 local function list_content_column(rest)
+  if is_thematic_break(rest) then
+    return nil
+  end
   for _, pattern in ipairs(LIST_MARKERS) do
     local indent, marker, gap = rest:match(pattern)
     if indent then
@@ -1178,6 +1225,12 @@ function M.scan(text)
   -- made "10. outer" / "    - nested" / "    {ix: ...}" read as code, where
   -- pandoc keeps that last line a lazy continuation of the outer item.
   local list_stack = {}       -- { { column = n, depth = n }, ... }, innermost last
+  -- A list marker cannot interrupt an open paragraph in this dialect: pandoc
+  -- reads "para" then "1. item" as one lazy paragraph, so treating it as a
+  -- list start opened a phantom item whose content column then reported a
+  -- following indented code block as prose. Only a *top-level* open is gated;
+  -- nesting inside an already-open list is unaffected.
+  local in_paragraph = false
   local number = 0
 
   -- The "text .. \n" split (and the empty trailing record it produces for
@@ -1216,6 +1269,9 @@ function M.scan(text)
     local column = indent_columns(rest)
     if not blank and not open_marker then
       local started = list_content_column(rest)
+      if started and #list_stack == 0 and in_paragraph then
+        started = nil        -- a marker cannot interrupt an open paragraph
+      end
       if started and column <= list_column + 3 then
         list_stack[#list_stack + 1] = { column = started, depth = depth }
       elseif column < list_column then
@@ -1282,6 +1338,11 @@ function M.scan(text)
     end
 
     prev_blank = blank
+    if blank or record.in_code or is_thematic_break(rest) or rest:match("^#") then
+      in_paragraph = false
+    else
+      in_paragraph = true
+    end
   end
 
   -- A fence still open at the end of the document never closed, so under this
@@ -1302,7 +1363,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/scanner_spec.lua`
-Expected: PASS, 41 successes
+Expected: PASS, 44 successes
 
 - [ ] **Step 5: Commit**
 
