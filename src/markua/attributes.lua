@@ -95,7 +95,11 @@ local function unquote(v)
   return inner or v
 end
 
-function M.parse(text, file, line)
+--- Parse an attribute list. `sink` is optional and only receives duplicate-key
+--- warnings; it is the seam a later caller uses to collect them into the
+--- warning list the Markua spec asks a Processor to keep, rather than writing
+--- each one straight to stderr.
+function M.parse(text, file, line, sink)
   local t = trim(text)
   local body = t:match("^{(.*)}$")
   if not body then
@@ -103,6 +107,7 @@ function M.parse(text, file, line)
   end
 
   local parsed = { id = nil, classes = {}, keyvals = {}, bare = {} }
+  local seen_keys = {}
 
   for _, field in ipairs(split_fields(body)) do
     local f = trim(field)
@@ -110,13 +115,34 @@ function M.parse(text, file, line)
       local key, value = f:match("^([%w%-_]+)%s*:%s*(.*)$")
       if key then
         value = unquote(trim(value))
-        if key == "class" then
+        if seen_keys[key] then
+          -- Markua spec, "Attribute Keys": "If a key is duplicated in an
+          -- attribute list, the first key value is used and subsequent ones
+          -- are ignored. A Markua Processor should add a warning in its list
+          -- of warnings, which are *not* output in the output itself." This
+          -- is a warning, not an error -- the document still has a defined
+          -- meaning -- so the later value is dropped and the author is told.
+          errors.warn(file, line, string.format("duplicate attribute key %q; first value kept", key), sink)
+        elseif key == "class" then
+          -- `class` is an ordinary attribute key, so the duplicate rule above
+          -- governs it too: a repeated class: does not accumulate. The
+          -- classes list exists for the `.name` shortcut, which is a
+          -- different syntax.
+          seen_keys[key] = true
           parsed.classes[#parsed.classes + 1] = value
         else
+          seen_keys[key] = true
           parsed.keyvals[key] = value
         end
       elseif f:sub(1, 1) == "#" then
-        parsed.id = f:sub(2)
+        -- Same first-wins rule; the spec asks for an error in the log rather
+        -- than a warning for a duplicate id, but the value still resolves, so
+        -- this reports without aborting.
+        if parsed.id ~= nil then
+          errors.warn(file, line, "duplicate id; first value kept", sink)
+        else
+          parsed.id = f:sub(2)
+        end
       elseif f:sub(1, 1) == "." then
         parsed.classes[#parsed.classes + 1] = f:sub(2)
       else

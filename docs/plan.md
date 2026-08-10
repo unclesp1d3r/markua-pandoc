@@ -125,6 +125,19 @@ what was run.
   were found by differential testing against pandoc rather than by reading, and
   the fixtures are frozen as specs.
 
+- **Duplicate attribute keys are first-wins with a warning, per the spec.**
+  The Markua spec's *Attribute Keys* section is explicit: "If a key is
+  duplicated in an attribute list, the first key value is used and subsequent
+  ones are ignored. A Markua Processor should add a warning in its list of
+  warnings, which are *not* output in the output itself." `class` is an
+  ordinary attribute key, so a repeated `class:` does **not** accumulate --
+  only the `.name` shortcut builds up a class list. A duplicate `id` follows
+  the same first-wins rule. `parse` takes an optional sink for these warnings,
+  which is the seam Task 4 uses to collect them into a real warning list
+  instead of writing each to stderr. *(Rejected: last-wins, which was the
+  incidental behavior of a Lua map; and raising a hard error, which the spec
+  contradicts -- the document still has a defined meaning.)*
+
 - **Parse permissively, emit strictly.** The two ends of this module answer to
   different traditions, and conflating them produced two bugs. Markua is a
   markdown dialect, and markdown has no such thing as a parse error, so `parse`
@@ -1335,15 +1348,42 @@ describe("attributes.to_pandoc_attr name representability", function()
 end)
 
 describe("attributes.parse duplicate keys", function()
-  it("keeps the last occurrence of a repeated key", function()
-    -- Last-wins is what the keyvals table gives; pin it so the behavior is a
-    -- decision rather than an accident a later refactor could flip.
-    local a = attributes.parse('{title: "first", title: "second"}', "f.md", 1)
-    assert.equals("second", a.keyvals["title"])
+  -- Markua spec, "Attribute Keys": "If a key is duplicated in an attribute
+  -- list, the first key value is used and subsequent ones are ignored. A
+  -- Markua Processor should add a warning in its list of warnings, which are
+  -- *not* output in the output itself."
+  -- parse takes an optional sink for these warnings, so the spec asserts them
+  -- instead of printing to stderr.
+  local function sink()
+    local written = {}
+    return { write = function(_, ...) written[#written + 1] = table.concat({ ... }) end },
+           function() return table.concat(written) end
+  end
+
+  it("keeps the first occurrence of a repeated key and warns", function()
+    local out, text = sink()
+    local a = attributes.parse('{title: "first", title: "second"}', "f.md", 1, out)
+    assert.equals("first", a.keyvals["title"])
+    assert.is_truthy(text():find("duplicate attribute key"))
+    assert.is_truthy(text():find("f.md:1"))
   end)
 
-  it("accumulates repeated class keys rather than replacing them", function()
-    local a = attributes.parse("{class: tip, class: wide}", "f.md", 1)
+  it("applies the same first-wins rule to a repeated class key", function()
+    -- `class` is an ordinary attribute key, so it does not accumulate. The
+    -- classes list exists for the `.name` shortcut, a different syntax.
+    local out = sink()
+    local a = attributes.parse("{class: tip, class: wide}", "f.md", 1, out)
+    assert.same({ "tip" }, a.classes)
+  end)
+
+  it("keeps the first id and ignores a later one", function()
+    local out = sink()
+    local a = attributes.parse("{#first, #second}", "f.md", 1, out)
+    assert.equals("first", a.id)
+  end)
+
+  it("still accumulates distinct classes from the .name shortcut", function()
+    local a = attributes.parse("{.tip, .wide}", "f.md", 1)
     assert.same({ "tip", "wide" }, a.classes)
   end)
 end)
@@ -1473,7 +1513,11 @@ local function unquote(v)
   return inner or v
 end
 
-function M.parse(text, file, line)
+--- Parse an attribute list. `sink` is optional and only receives duplicate-key
+--- warnings; it is the seam a later caller uses to collect them into the
+--- warning list the Markua spec asks a Processor to keep, rather than writing
+--- each one straight to stderr.
+function M.parse(text, file, line, sink)
   local t = trim(text)
   local body = t:match("^{(.*)}$")
   if not body then
@@ -1481,6 +1525,7 @@ function M.parse(text, file, line)
   end
 
   local parsed = { id = nil, classes = {}, keyvals = {}, bare = {} }
+  local seen_keys = {}
 
   for _, field in ipairs(split_fields(body)) do
     local f = trim(field)
@@ -1488,13 +1533,34 @@ function M.parse(text, file, line)
       local key, value = f:match("^([%w%-_]+)%s*:%s*(.*)$")
       if key then
         value = unquote(trim(value))
-        if key == "class" then
+        if seen_keys[key] then
+          -- Markua spec, "Attribute Keys": "If a key is duplicated in an
+          -- attribute list, the first key value is used and subsequent ones
+          -- are ignored. A Markua Processor should add a warning in its list
+          -- of warnings, which are *not* output in the output itself." This
+          -- is a warning, not an error -- the document still has a defined
+          -- meaning -- so the later value is dropped and the author is told.
+          errors.warn(file, line, string.format("duplicate attribute key %q; first value kept", key), sink)
+        elseif key == "class" then
+          -- `class` is an ordinary attribute key, so the duplicate rule above
+          -- governs it too: a repeated class: does not accumulate. The
+          -- classes list exists for the `.name` shortcut, which is a
+          -- different syntax.
+          seen_keys[key] = true
           parsed.classes[#parsed.classes + 1] = value
         else
+          seen_keys[key] = true
           parsed.keyvals[key] = value
         end
       elseif f:sub(1, 1) == "#" then
-        parsed.id = f:sub(2)
+        -- Same first-wins rule; the spec asks for an error in the log rather
+        -- than a warning for a duplicate id, but the value still resolves, so
+        -- this reports without aborting.
+        if parsed.id ~= nil then
+          errors.warn(file, line, "duplicate id; first value kept", sink)
+        else
+          parsed.id = f:sub(2)
+        end
       elseif f:sub(1, 1) == "." then
         parsed.classes[#parsed.classes + 1] = f:sub(2)
       else
@@ -1581,7 +1647,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/attributes_spec.lua`
-Expected: PASS, 25 successes
+Expected: PASS, 27 successes
 
 - [ ] **Step 5: Commit**
 

@@ -165,15 +165,42 @@ describe("attributes.to_pandoc_attr name representability", function()
 end)
 
 describe("attributes.parse duplicate keys", function()
-  it("keeps the last occurrence of a repeated key", function()
-    -- Last-wins is what the keyvals table gives; pin it so the behavior is a
-    -- decision rather than an accident a later refactor could flip.
-    local a = attributes.parse('{title: "first", title: "second"}', "f.md", 1)
-    assert.equals("second", a.keyvals["title"])
+  -- Markua spec, "Attribute Keys": "If a key is duplicated in an attribute
+  -- list, the first key value is used and subsequent ones are ignored. A
+  -- Markua Processor should add a warning in its list of warnings, which are
+  -- *not* output in the output itself."
+  -- parse takes an optional sink for these warnings, so the spec asserts them
+  -- instead of printing to stderr.
+  local function sink()
+    local written = {}
+    return { write = function(_, ...) written[#written + 1] = table.concat({ ... }) end },
+           function() return table.concat(written) end
+  end
+
+  it("keeps the first occurrence of a repeated key and warns", function()
+    local out, text = sink()
+    local a = attributes.parse('{title: "first", title: "second"}', "f.md", 1, out)
+    assert.equals("first", a.keyvals["title"])
+    assert.is_truthy(text():find("duplicate attribute key"))
+    assert.is_truthy(text():find("f.md:1"))
   end)
 
-  it("accumulates repeated class keys rather than replacing them", function()
-    local a = attributes.parse("{class: tip, class: wide}", "f.md", 1)
+  it("applies the same first-wins rule to a repeated class key", function()
+    -- `class` is an ordinary attribute key, so it does not accumulate. The
+    -- classes list exists for the `.name` shortcut, a different syntax.
+    local out = sink()
+    local a = attributes.parse("{class: tip, class: wide}", "f.md", 1, out)
+    assert.same({ "tip" }, a.classes)
+  end)
+
+  it("keeps the first id and ignores a later one", function()
+    local out = sink()
+    local a = attributes.parse("{#first, #second}", "f.md", 1, out)
+    assert.equals("first", a.id)
+  end)
+
+  it("still accumulates distinct classes from the .name shortcut", function()
+    local a = attributes.parse("{.tip, .wide}", "f.md", 1)
     assert.same({ "tip", "wide" }, a.classes)
   end)
 end)
