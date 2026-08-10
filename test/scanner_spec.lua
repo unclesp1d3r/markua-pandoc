@@ -330,3 +330,68 @@ describe("scanner tilde fences", function()
     assert.is_false(lines[5].in_code)
   end)
 end)
+
+-- Boundary cases surfaced by mutation testing: each of these fails if the
+-- named constant or comparison drifts, and each expectation is pandoc's own
+-- answer under the reader's target format.
+describe("scanner boundary arithmetic", function()
+  it("pins the tab stop at four columns", function()
+    -- "- item" puts content at column 2, so code needs column 6. One tab
+    -- reaches column 4 -- a continuation. At a tab stop of 8 it would reach 8
+    -- and be misread as code, silently dropping the attribute.
+    local lines = scanner.scan("- item\n\n\t{ix: \"term\"}\n")
+    assert.is_false(lines[3].in_code)
+  end)
+
+  it("does not treat a four-column-indented delimiter as a fence", function()
+    -- A tab-indented ``` is indented code, not a fence. If the fence check
+    -- accepted four columns, these two lines would pair up and swallow the
+    -- prose between them.
+    local lines = scanner.scan("Consider:\n\n\t```\nActual prose.\n\t```\n\nDone.\n")
+    assert.is_nil(lines[3].fence)
+    assert.is_false(lines[4].in_code)
+  end)
+
+  it("does not close a fence on a delimiter at a deeper blockquote depth", function()
+    -- A code sample quoting a transcript can contain "> ```" as literal text.
+    local lines = scanner.scan("```\ncode one\n> ```\nstill code\n```\nafter\n")
+    assert.is_true(lines[3].in_code)
+    assert.is_true(lines[4].in_code)
+    assert.equals("close", lines[5].fence)
+    assert.is_false(lines[6].in_code)
+  end)
+
+  it("does not re-anchor on a marker-shaped line inside indented code", function()
+    -- Eight columns under a two-column item is code, and the fact that it
+    -- starts with "- " must not make it a new nesting level.
+    local lines = scanner.scan("- outer\n\n        - deep\n")
+    assert.is_true(lines[3].in_code)
+  end)
+
+  it("restores the enclosing item's column when a nested list dedents", function()
+    -- "10. " puts content at column 4 and the nested "- " at column 6. A line
+    -- back at column 4 is a lazy continuation of the OUTER item, not code --
+    -- resetting to top level instead made it code and dropped the attribute.
+    local para = scanner.scan("10. outer\n\n    - nested\n\n    {ix: \"term\"}\n")
+    assert.is_false(para[5].in_code)
+
+    -- The nested "- " sits at content column 6, so code needs column 10 --
+    -- eight columns is still a continuation of the nested item. Verified
+    -- against pandoc, which emits a CodeBlock at ten columns and none at eight.
+    local still_para = scanner.scan("10. outer\n\n    - nested\n\n        sample\n")
+    assert.is_false(still_para[5].in_code)
+
+    local code = scanner.scan("10. outer\n\n    - nested\n\n          sample\n")
+    assert.is_true(code[5].in_code)
+  end)
+
+  it("counts a tab after a blockquote marker in columns, not bytes", function()
+    -- The marker takes one column of the tab's expansion; the rest is real
+    -- indentation. Eating the whole tab byte measured two columns short.
+    local code = scanner.scan("> quoted\n>\n>\t  sample\n")
+    assert.is_true(code[3].in_code)
+
+    local para = scanner.scan("> quoted\n>\n>\t{ix: \"term\"}\n")
+    assert.is_false(para[3].in_code)
+  end)
+end)

@@ -244,9 +244,13 @@ describe("attributes.parse duplicate keys", function()
   end)
 
   it("keeps the first id and ignores a later one", function()
-    local out = sink()
+    local out, text = sink()
     local a = attributes.parse("{#first, #second}", "f.md", 1, out)
     assert.equals("first", a.id)
+    -- Assert the warning actually fires: Task 4 consumes this sink to build
+    -- the warning list the spec requires, so a silently dropped warning here
+    -- would ship undetected.
+    assert.is_truthy(text():find("duplicate id"))
   end)
 
   it("still accumulates distinct classes from the .name shortcut", function()

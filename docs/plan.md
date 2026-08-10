@@ -922,6 +922,71 @@ describe("scanner tilde fences", function()
     assert.is_false(lines[5].in_code)
   end)
 end)
+
+-- Boundary cases surfaced by mutation testing: each of these fails if the
+-- named constant or comparison drifts, and each expectation is pandoc's own
+-- answer under the reader's target format.
+describe("scanner boundary arithmetic", function()
+  it("pins the tab stop at four columns", function()
+    -- "- item" puts content at column 2, so code needs column 6. One tab
+    -- reaches column 4 -- a continuation. At a tab stop of 8 it would reach 8
+    -- and be misread as code, silently dropping the attribute.
+    local lines = scanner.scan("- item\n\n\t{ix: \"term\"}\n")
+    assert.is_false(lines[3].in_code)
+  end)
+
+  it("does not treat a four-column-indented delimiter as a fence", function()
+    -- A tab-indented ``` is indented code, not a fence. If the fence check
+    -- accepted four columns, these two lines would pair up and swallow the
+    -- prose between them.
+    local lines = scanner.scan("Consider:\n\n\t```\nActual prose.\n\t```\n\nDone.\n")
+    assert.is_nil(lines[3].fence)
+    assert.is_false(lines[4].in_code)
+  end)
+
+  it("does not close a fence on a delimiter at a deeper blockquote depth", function()
+    -- A code sample quoting a transcript can contain "> ```" as literal text.
+    local lines = scanner.scan("```\ncode one\n> ```\nstill code\n```\nafter\n")
+    assert.is_true(lines[3].in_code)
+    assert.is_true(lines[4].in_code)
+    assert.equals("close", lines[5].fence)
+    assert.is_false(lines[6].in_code)
+  end)
+
+  it("does not re-anchor on a marker-shaped line inside indented code", function()
+    -- Eight columns under a two-column item is code, and the fact that it
+    -- starts with "- " must not make it a new nesting level.
+    local lines = scanner.scan("- outer\n\n        - deep\n")
+    assert.is_true(lines[3].in_code)
+  end)
+
+  it("restores the enclosing item's column when a nested list dedents", function()
+    -- "10. " puts content at column 4 and the nested "- " at column 6. A line
+    -- back at column 4 is a lazy continuation of the OUTER item, not code --
+    -- resetting to top level instead made it code and dropped the attribute.
+    local para = scanner.scan("10. outer\n\n    - nested\n\n    {ix: \"term\"}\n")
+    assert.is_false(para[5].in_code)
+
+    -- The nested "- " sits at content column 6, so code needs column 10 --
+    -- eight columns is still a continuation of the nested item. Verified
+    -- against pandoc, which emits a CodeBlock at ten columns and none at eight.
+    local still_para = scanner.scan("10. outer\n\n    - nested\n\n        sample\n")
+    assert.is_false(still_para[5].in_code)
+
+    local code = scanner.scan("10. outer\n\n    - nested\n\n          sample\n")
+    assert.is_true(code[5].in_code)
+  end)
+
+  it("counts a tab after a blockquote marker in columns, not bytes", function()
+    -- The marker takes one column of the tab's expansion; the rest is real
+    -- indentation. Eating the whole tab byte measured two columns short.
+    local code = scanner.scan("> quoted\n>\n>\t  sample\n")
+    assert.is_true(code[3].in_code)
+
+    local para = scanner.scan("> quoted\n>\n>\t{ix: \"term\"}\n")
+    assert.is_false(para[3].in_code)
+  end)
+end)
 ```
 
 - [ ] **Step 2: Run it to make sure it fails**
@@ -1014,13 +1079,29 @@ end
 -- rewrite the sample -- the corruption this module exists to prevent, just
 -- one container deeper.
 local function strip_blockquote(line)
-  local depth, rest = 0, line
+  local depth, rest, column = 0, line, 0
   while true do
-    local after = rest:match("^ ? ? ?>%s?(.*)$")
-    if not after then
+    local indent, tail = rest:match("^( ? ? ?)>(.*)$")
+    if not indent then
       return depth, rest
     end
-    depth, rest = depth + 1, after
+    column = column + #indent + 1          -- past the ">" itself
+    -- The marker swallows one optional space. A tab is not one space: it
+    -- expands to the next 4-column stop, the marker takes one column of that
+    -- expansion, and the remainder is real indentation. Eating the whole tab
+    -- byte instead loses those columns, so "> " + tab + two spaces measured 2
+    -- columns here while pandoc measured 4 and made it a CodeBlock.
+    local first = tail:sub(1, 1)
+    if first == "\t" then
+      local width = TAB_STOP - (column % TAB_STOP)
+      rest = (" "):rep(width - 1) .. tail:sub(2)
+    elseif first == " " then
+      rest = tail:sub(2)
+      column = column + 1
+    else
+      rest = tail
+    end
+    depth = depth + 1
   end
 end
 
@@ -1092,8 +1173,11 @@ function M.scan(text)
   local open_marker, open_depth, open_index = nil, 0, nil
   local indented = false      -- inside a four-column indented code block
   local prev_blank = true     -- start of document counts as a blank
-  local list_column = 0       -- content column of the innermost open list item
-  local list_depth = 0        -- blockquote depth the open list item belongs to
+  -- A stack, not a single column: dedenting out of a nested item returns to
+  -- the *enclosing* item's content column, not to top level. Resetting to 0
+  -- made "10. outer" / "    - nested" / "    {ix: ...}" read as code, where
+  -- pandoc keeps that last line a lazy continuation of the outer item.
+  local list_stack = {}       -- { { column = n, depth = n }, ... }, innermost last
   local number = 0
 
   -- The "text .. \n" split (and the empty trailing record it produces for
@@ -1124,18 +1208,23 @@ function M.scan(text)
     -- closed quoted fence leave a stale depth behind, which then cleared a
     -- later top-level list and misread its lazy continuation as code. A blank
     -- line ends nothing -- a loose list keeps its item open across one.
-    if depth < list_depth then
-      list_column, list_depth = 0, depth
+    while #list_stack > 0 and list_stack[#list_stack].depth > depth do
+      list_stack[#list_stack] = nil
     end
+    local list_column = #list_stack > 0 and list_stack[#list_stack].column or 0
 
     local column = indent_columns(rest)
     if not blank and not open_marker then
       local started = list_content_column(rest)
       if started and column <= list_column + 3 then
-        list_column, list_depth = started, depth
+        list_stack[#list_stack + 1] = { column = started, depth = depth }
       elseif column < list_column then
-        list_column, list_depth = 0, depth   -- dedented out of the item
+        -- Dedent: pop only the items this line has actually left.
+        while #list_stack > 0 and column < list_stack[#list_stack].column do
+          list_stack[#list_stack] = nil
+        end
       end
+      list_column = #list_stack > 0 and list_stack[#list_stack].column or 0
     end
 
     -- A fence sits 0-3 columns past the container's content column; at four
@@ -1213,7 +1302,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/scanner_spec.lua`
-Expected: PASS, 35 successes
+Expected: PASS, 41 successes
 
 - [ ] **Step 5: Commit**
 
@@ -1490,9 +1579,13 @@ describe("attributes.parse duplicate keys", function()
   end)
 
   it("keeps the first id and ignores a later one", function()
-    local out = sink()
+    local out, text = sink()
     local a = attributes.parse("{#first, #second}", "f.md", 1, out)
     assert.equals("first", a.id)
+    -- Assert the warning actually fires: Task 4 consumes this sink to build
+    -- the warning list the spec requires, so a silently dropped warning here
+    -- would ship undetected.
+    assert.is_truthy(text():find("duplicate id"))
   end)
 
   it("still accumulates distinct classes from the .name shortcut", function()

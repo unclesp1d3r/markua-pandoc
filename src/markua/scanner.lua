@@ -78,13 +78,29 @@ end
 -- rewrite the sample -- the corruption this module exists to prevent, just
 -- one container deeper.
 local function strip_blockquote(line)
-  local depth, rest = 0, line
+  local depth, rest, column = 0, line, 0
   while true do
-    local after = rest:match("^ ? ? ?>%s?(.*)$")
-    if not after then
+    local indent, tail = rest:match("^( ? ? ?)>(.*)$")
+    if not indent then
       return depth, rest
     end
-    depth, rest = depth + 1, after
+    column = column + #indent + 1          -- past the ">" itself
+    -- The marker swallows one optional space. A tab is not one space: it
+    -- expands to the next 4-column stop, the marker takes one column of that
+    -- expansion, and the remainder is real indentation. Eating the whole tab
+    -- byte instead loses those columns, so "> " + tab + two spaces measured 2
+    -- columns here while pandoc measured 4 and made it a CodeBlock.
+    local first = tail:sub(1, 1)
+    if first == "\t" then
+      local width = TAB_STOP - (column % TAB_STOP)
+      rest = (" "):rep(width - 1) .. tail:sub(2)
+    elseif first == " " then
+      rest = tail:sub(2)
+      column = column + 1
+    else
+      rest = tail
+    end
+    depth = depth + 1
   end
 end
 
@@ -156,8 +172,11 @@ function M.scan(text)
   local open_marker, open_depth, open_index = nil, 0, nil
   local indented = false      -- inside a four-column indented code block
   local prev_blank = true     -- start of document counts as a blank
-  local list_column = 0       -- content column of the innermost open list item
-  local list_depth = 0        -- blockquote depth the open list item belongs to
+  -- A stack, not a single column: dedenting out of a nested item returns to
+  -- the *enclosing* item's content column, not to top level. Resetting to 0
+  -- made "10. outer" / "    - nested" / "    {ix: ...}" read as code, where
+  -- pandoc keeps that last line a lazy continuation of the outer item.
+  local list_stack = {}       -- { { column = n, depth = n }, ... }, innermost last
   local number = 0
 
   -- The "text .. \n" split (and the empty trailing record it produces for
@@ -188,18 +207,23 @@ function M.scan(text)
     -- closed quoted fence leave a stale depth behind, which then cleared a
     -- later top-level list and misread its lazy continuation as code. A blank
     -- line ends nothing -- a loose list keeps its item open across one.
-    if depth < list_depth then
-      list_column, list_depth = 0, depth
+    while #list_stack > 0 and list_stack[#list_stack].depth > depth do
+      list_stack[#list_stack] = nil
     end
+    local list_column = #list_stack > 0 and list_stack[#list_stack].column or 0
 
     local column = indent_columns(rest)
     if not blank and not open_marker then
       local started = list_content_column(rest)
       if started and column <= list_column + 3 then
-        list_column, list_depth = started, depth
+        list_stack[#list_stack + 1] = { column = started, depth = depth }
       elseif column < list_column then
-        list_column, list_depth = 0, depth   -- dedented out of the item
+        -- Dedent: pop only the items this line has actually left.
+        while #list_stack > 0 and column < list_stack[#list_stack].column do
+          list_stack[#list_stack] = nil
+        end
       end
+      list_column = #list_stack > 0 and list_stack[#list_stack].column or 0
     end
 
     -- A fence sits 0-3 columns past the container's content column; at four
