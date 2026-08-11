@@ -75,6 +75,133 @@ verified.
   `front`), matching what the attribute parser already produces, so there is no
   mapping table to drift.
 
+Settled while implementing Tasks 2 and 3. Each was found by executing the
+reference source this document ships, not by reading it, so the rationale names
+what was run.
+
+- **Indentation is measured in columns, expanding tabs to 4-column stops.**
+  Counting space characters scores a tab as zero, which reported a
+  tab-indented `{timeout: 30}` as prose. pandoc 3.10.1 parses that line -- and
+  the same line preceded by two spaces and a tab, where the tab advances to the
+  next stop -- as a `CodeBlock`, so the attribute-list transform would have rewritten a code
+  sample, the exact corruption fence-awareness exists to prevent. The same
+  measure governs the fence-indent test, because a tab-indented ` ``` ` is an
+  indented code block to pandoc, not a fence. *(Rejected: scoring a tab as one
+  column, which keeps that line a fence and disagrees with pandoc.)*
+
+- **`scanner.scan` normalizes CRLF and lone CR to LF.** The scanner already
+  owns line splitting, so it is the one place a carriage return can be removed
+  once instead of in every later transform. CRLF is substituted before lone CR;
+  the reverse order collapses `\r\n` into `\n\n` and invents a blank line. This
+  one is proactive rather than a fix for observed breakage -- no manuscript in
+  the repository uses CRLF -- but the cost is one function and the alternative
+  surfaces at Task 13 with every module to fix at once.
+
+- **A value is carried by its quote character, not by escaping.** The reader
+  calls `pandoc.read` with `markdown_strict` plus extensions, which leaves
+  `all_symbols_escapable` OFF, so only original Markdown's escapable set works
+  there: a backslash is in it, a double quote is not. Verified against pandoc
+  3.10.1 under that exact format -- `{title="He said \"hi\""}` does **not**
+  parse, and pandoc abandons the construct and renders the `:::` delimiters as
+  literal paragraph text, while `{title='He said "hi"'}` parses to the value
+  `He said "hi"`. So `to_pandoc_attr` single-quotes a value containing a double
+  quote, double-quotes it otherwise, and still escapes backslashes. A value
+  carrying *both* quote characters is unrepresentable in this syntax and is a
+  hard error rather than silent corruption. *(Rejected: backslash-escaping the
+  quote, which is what plain `-f markdown` accepts -- that was measured against
+  the wrong format and would have leaked braces into every book with a quoted
+  title. Rejected: adding `all_symbols_escapable` to the target format, which
+  would change escaping semantics for the whole document to fix one field.)*
+
+- **An id or class is emitted only in pandoc's own grammar.** From
+  `Readers/Markdown.hs`: an id is `many1 (alphaNum <|> oneOf "-_:.")` and a
+  class is `letter` then the same set, so an id may begin with a digit and a
+  class may not, and neither may carry anything else. Outside that grammar
+  pandoc rejects the *entire* attribute block, so `{#a&b .3things}` does not
+  merely lose a name -- it leaks braces into the prose and drops every other
+  attribute with it. `to_pandoc_attr` raises instead, naming the offender.
+  Bytes above ASCII are accepted, since pandoc's `alphaNum` is Unicode-aware
+  and `café` is a legal id; matching that exactly would need a Unicode table in
+  pure Lua, and erring toward acceptance keeps real author text working.
+
+- **`TARGET_FORMAT` must carry `fenced_code_blocks`.** The Markua spec allows a
+  tilde delimiter -- "You can also insert an inline resource using three or more
+  tildes (`~`) as the delimiter, instead of the more typical backticks" -- and
+  `backtick_code_blocks` alone does not enable it. Without the extension pandoc
+  parses a legitimate `~~~` block as a paragraph containing `Subscript`
+  artifacts, so the block renders as garbled prose in every writer while the
+  scanner correctly reports it as code. Verified against pandoc 3.10.1 both
+  ways. This is why the scanner's fence table and the reader's format list have
+  to be changed together.
+
+- **The scanner is measured against the reader's own target format, not
+  CommonMark.** `pandoc.read` is called with `markdown_strict` plus the
+  extension list above, and that dialect disagrees with CommonMark where it
+  matters here: an unclosed fence is a code block running to EOF in
+  `commonmark` and `gfm`, but is *not a fence at all* in `markdown_strict` --
+  the delimiter stays literal text. The scanner follows the target format, so
+  an unterminated fence reverts to prose. Modelling the spec instead would make
+  the scanner and the parser it feeds disagree, which is the one thing this
+  module cannot afford. *(Rejected: following the CommonMark rule, which is
+  more famous and wrong for this pipeline.)*
+
+- **Indentation is measured from the container's content column.** A blockquote
+  prefix is stripped before anything else, and a list item shifts where its
+  content begins, so `1. item` followed by a four-space line is a lazy
+  paragraph continuation rather than code -- content column 3, and 4 < 3 + 4.
+  Measuring from column 0 made the scanner blind to every fence inside a `>`
+  quote and made it report an author's habitually-indented `{ix: "term"}` under
+  a numbered step as code, silently dropping the index entry. Both directions
+  were found by differential testing against pandoc rather than by reading, and
+  the fixtures are frozen as specs.
+
+- **Duplicate attribute keys are first-wins with a warning, per the spec.**
+  The Markua spec's *Attribute Keys* section is explicit: "If a key is
+  duplicated in an attribute list, the first key value is used and subsequent
+  ones are ignored. A Markua Processor should add a warning in its list of
+  warnings, which are *not* output in the output itself." `class` is an
+  ordinary attribute key, so a repeated `class:` does **not** accumulate --
+  only the `.name` shortcut builds up a class list. A duplicate `id` follows
+  the same first-wins rule. `parse` takes an optional sink for these warnings,
+  which is the seam Task 4 uses to collect them into a real warning list
+  instead of writing each to stderr. *(Rejected: last-wins, which was the
+  incidental behavior of a Lua map; and raising a hard error, which the spec
+  contradicts -- the document still has a defined meaning.)*
+
+- **Parse permissively, emit strictly.** The two ends of this module answer to
+  different traditions, and conflating them produced two bugs. Markua is a
+  markdown dialect, and markdown has no such thing as a parse error, so `parse`
+  recovers rather than rejecting: an unclosed quote stops delimiting, staying
+  literal in the value while the following field still parses. That is measured
+  pandoc behavior -- `{#h title="abc class=tip}` yields the value `"abc` *and*
+  still applies the class `tip` -- and it fixes the silent field loss without a
+  rule about which malformed input is illegal. Erroring instead would refuse
+  `{title: 5" pipe}`, which parses correctly today. The output end faces XML's
+  opposite rule, since DocBook and EPUB treat malformed markup as fatal, so
+  `to_pandoc_attr` refuses to emit anything pandoc cannot read back. *(Rejected:
+  raising on an unterminated quote, which needs a quote-opening rule Markua does
+  not define and rejects input that works; and sanitizing an unsafe id, which
+  silently rewrites an anchor the author cross-references elsewhere.)*
+
+- **An unrepresentable id or class is a hard error, not an escape problem.**
+  A value can always be carried by quoting and backslashes; an id or class
+  cannot -- pandoc's attribute syntax has no escape for them. Measured against
+  pandoc 3.10.1: `-`, `_`, `.` and a leading digit are accepted, while
+  whitespace, a `"`, a brace, or an empty name makes pandoc reject the *entire*
+  attribute block and render it as literal text. So `{#my id .a class}` does not
+  just lose the id -- it leaks braces into the prose and drops the class too,
+  the precise "never pass through as literal braces into the output" failure the
+  global constraints forbid. `to_pandoc_attr` raises through `errors`, naming
+  the offending id or class.
+
+- **`split_fields` tracks backslash parity when it toggles quote state.**
+  Flipping on every `"` leaves the tokenizer mis-synchronized after an odd
+  number of escaped quotes: `{title: "She said \"hi, there\""}` truncated to
+  `"She said \"hi` and invented a bare word `there\""`. This is tokenizing, not
+  unescaping -- `parse` still hands `\"` through verbatim, because whether
+  Markua defines an escape convention is a separate question from whether the
+  parser may silently drop half a value.
+
 **Independently implemented, not ported.** Where this reader mirrors a pandoc
 behavior -- delimiter escaping, fence sizing -- the behavior was observed and
 reimplemented in Lua. pandoc is GPL and this project is Apache-2.0; conventions
@@ -453,14 +580,29 @@ git commit -m "feat: error type with source position and test harness"
 
 **Interfaces:**
 
-- Consumes: `errors` from Task 1
+- Consumes: nothing. The scanner has no error path, so it does not require `errors`.
 - Produces: `scanner.scan(text) -> array of line records`. Each record is `{ text = string, number = integer, in_code = boolean, fence = "open"|"close"|nil, info = string|nil }`. `in_code` is true for lines *inside* a fence and for the fence delimiters themselves. `info` carries the fence info string (e.g. `python`, `$`) on the opening fence record.
+- `scan` normalizes CRLF and lone CR to LF, so no record's `text` carries a stray carriage return and no downstream module has to special-case one.
+- Joining every record's `text` with `\n` reproduces the normalized input exactly. Newline-terminated input therefore ends in an empty record, and that record's `number` counts one past the document's last real line — a caller reporting an error position straight from `record.number` must not assume every record names a line an author can open.
 
 - [ ] **Step 1: Write the failing test**
 
 Create `test/scanner_spec.lua`:
 
 ```lua
+-- Spec for the fence-aware line scanner (src/markua/scanner.lua).
+--
+-- Written before the module exists: this unit's TDD cycle starts red. Run
+-- with `busted test/scanner_spec.lua` from the repo root --
+-- require("src.markua.scanner") resolves through .busted's lpath only from
+-- there.
+--
+-- The first seven scenarios are docs/plan.md Task 2 Step 1's own spec,
+-- carried over verbatim so a regression in the corrected module is visible
+-- as a failure rather than a silent reclassification. Everything after them
+-- covers this plan's three corrections: KTD1 (column-based indentation),
+-- KTD2 (line-ending normalization), and KTD3 (the trailing-record round
+-- trip) -- plus the remaining fence-boundary cases R4-R5 call for.
 local scanner = require("src.markua.scanner")
 
 describe("scanner", function()
@@ -513,6 +655,368 @@ describe("scanner", function()
     local lines = scanner.scan("A paragraph\n    wrapped by hand.\n")
     assert.is_false(lines[2].in_code)
   end)
+
+  it("treats a tab-indented line after a blank line as code (KTD1)", function()
+    -- A bare space count scores a tab as zero columns, so the reference
+    -- scanner missed this. pandoc parses it as CodeBlock.
+    local lines = scanner.scan("Consider:\n\n\t{timeout: 30}\n\nDone.\n")
+    assert.is_false(lines[1].in_code)
+    assert.is_true(lines[3].in_code)
+    assert.is_false(lines[5].in_code)
+  end)
+
+  it("treats two spaces then a tab as reaching column four (KTD1)", function()
+    -- Column 2 plus a tab advances to the next 4-column stop, i.e. column 4.
+    local lines = scanner.scan("Consider:\n\n  \t{timeout: 30}\n\nDone.\n")
+    assert.is_true(lines[3].in_code)
+  end)
+
+  it("treats a tab-indented fence marker as indented code, not a fence (KTD1)", function()
+    -- A tab advances to column 4, which is indented code to pandoc, not a
+    -- fence -- so this line carries in_code but no fence field at all.
+    local lines = scanner.scan("Consider:\n\n\t```\nDone.\n")
+    assert.is_true(lines[3].in_code)
+    assert.is_nil(lines[3].fence)
+  end)
+
+  it("normalizes CRLF line endings while keeping fence and info detection intact (KTD2)", function()
+    local lines = scanner.scan('a\r\n```python\r\n{"k": 1}\r\n```\r\nb')
+    for _, record in ipairs(lines) do
+      assert.is_nil(record.text:find("\r"))
+    end
+    assert.equals("python", lines[2].info)
+    assert.equals("open", lines[2].fence)
+    assert.equals("close", lines[4].fence)
+    assert.is_true(lines[3].in_code)
+    assert.is_false(lines[5].in_code)
+  end)
+
+  it("splits a lone-CR document the same as its LF equivalent (KTD2)", function()
+    local cr = scanner.scan("a\rb\rc")
+    local lf = scanner.scan("a\nb\nc")
+    assert.equals(#lf, #cr)
+    for i = 1, #lf do
+      assert.equals(lf[i].text, cr[i].text)
+      assert.equals(lf[i].in_code, cr[i].in_code)
+    end
+  end)
+
+  it("round-trips exactly when every record's text is joined with \\n (KTD3, R10)", function()
+    local function round_trip(text)
+      local lines = scanner.scan(text)
+      local parts = {}
+      for _, record in ipairs(lines) do
+        parts[#parts + 1] = record.text
+      end
+      return table.concat(parts, "\n")
+    end
+
+    assert.equals("a\n", round_trip("a\n"))
+    assert.equals("a", round_trip("a"))
+    assert.equals("", round_trip(""))
+    assert.equals("```\ncode\n```\n", round_trip("```\ncode\n```\n"))
+    -- The round trip reproduces the NORMALIZED input, so CRLF in means LF out.
+    assert.equals("a\nb\n", round_trip("a\r\nb\r\n"))
+  end)
+
+  it("numbers the trailing record one past the last real line (KTD3)", function()
+    -- The sentinel record exists only for newline-terminated input, and its
+    -- number names no line an author can open. Later modules report error
+    -- positions straight from record.number, so pin both halves here.
+    local terminated = scanner.scan("a\nb\n")
+    assert.equals(3, #terminated)
+    assert.equals(3, terminated[3].number)
+    assert.equals("", terminated[3].text)
+
+    local unterminated = scanner.scan("a\nb")
+    assert.equals(2, #unterminated)
+    assert.equals(2, unterminated[2].number)
+  end)
+
+  it("closes on a longer closing fence but not on a shorter one", function()
+    local longer = scanner.scan("```\ncode\n````\nafter")
+    assert.equals("close", longer[3].fence)
+    assert.is_false(longer[4].in_code)
+
+    -- A shorter delimiter does not close, so this fence never closes -- and
+    -- an unclosed fence is not a fence under the reader's target format, so
+    -- the whole run reverts to prose. Verified: pandoc parses this as one
+    -- Para containing inline Code, not a CodeBlock.
+    local shorter = scanner.scan("````\ncode\n```\nafter")
+    assert.is_nil(shorter[3].fence)
+    assert.is_false(shorter[3].in_code)
+    assert.is_false(shorter[4].in_code)
+  end)
+
+  it("does not close an open fence when the delimiter carries an info string", function()
+    local lines = scanner.scan("```\ncode\n```text\nstill code\n```\nafter")
+    assert.is_nil(lines[3].fence)
+    assert.is_true(lines[3].in_code)
+    assert.is_true(lines[4].in_code)
+    assert.equals("close", lines[5].fence)
+    assert.is_false(lines[6].in_code)
+  end)
+
+  it("treats a fence that never closes as prose, not code", function()
+    -- markdown_strict and its extensions -- the format the reader hands to
+    -- pandoc.read -- require a fence to close before it is a fence at all;
+    -- an unclosed one is literal text. commonmark and gfm instead run the
+    -- block to EOF. Following the target format is what keeps this scanner's
+    -- answer and pandoc's identical, which is the module's whole job.
+    local lines = scanner.scan("```\na\nb\nc")
+    for i = 1, #lines do
+      assert.is_false(lines[i].in_code)
+    end
+    assert.is_nil(lines[1].fence)
+  end)
+
+  it("reverts an unclosed fence inside a blockquote when the quote ends", function()
+    local lines = scanner.scan("> ```\n> quoted\n\nafter\n")
+    assert.is_false(lines[1].in_code)
+    assert.is_false(lines[2].in_code)
+    assert.is_false(lines[4].in_code)
+  end)
+end)
+
+-- Every expectation below is pandoc 3.10.1's own answer for the same input,
+-- taken under the exact format the reader hands to pandoc.read
+-- (markdown_strict plus its extensions) rather than reasoned from the spec.
+-- The scanner exists to predict what pandoc will treat as code, so a
+-- disagreement here is a scanner bug by definition.
+describe("scanner container nesting", function()
+  it("sees a fenced block inside a blockquote", function()
+    local lines = scanner.scan('> ```python\n> {"k": 1}\n> ```\n\nafter\n')
+    assert.is_true(lines[1].in_code)
+    assert.equals("open", lines[1].fence)
+    assert.equals("python", lines[1].info)
+    assert.is_true(lines[2].in_code)
+    assert.equals("close", lines[3].fence)
+    assert.is_false(lines[5].in_code)
+  end)
+
+  it("sees an indented block inside a blockquote", function()
+    -- A bare ">" is the blank line that opens the indented block.
+    local lines = scanner.scan("> para\n>\n>     sample\n\nafter\n")
+    assert.is_true(lines[3].in_code)
+    assert.is_false(lines[5].in_code)
+  end)
+
+  it("sees a fence nested two blockquotes deep", function()
+    local lines = scanner.scan("> > ```\n> > sample\n> > ```\n")
+    assert.is_true(lines[2].in_code)
+  end)
+
+  it("handles a blockquote marker with no space after it", function()
+    local lines = scanner.scan(">```\n>sample\n>```\n")
+    assert.is_true(lines[2].in_code)
+  end)
+
+  it("does not treat a four-space line under a numbered item as code", function()
+    -- "1. " puts content at column 3, so code needs column 7. Four spaces is
+    -- a lazy paragraph continuation -- and an attribute an author indents by
+    -- habit there must still be converted, not skipped as code.
+    local lines = scanner.scan("1. item one\n\n    {ix: \"term\"}\n\n2. item two\n")
+    assert.is_false(lines[3].in_code)
+  end)
+
+  it("treats an eight-space line under a numbered item as code", function()
+    local lines = scanner.scan("1. item one\n\n        sample\n\n2. item two\n")
+    assert.is_true(lines[3].in_code)
+  end)
+
+  it("measures a bullet item's content column too", function()
+    local indented = scanner.scan("- item\n\n      sample\n\n- two\n")
+    assert.is_true(indented[3].in_code)
+
+    local para = scanner.scan("- item\n\n  {ix: \"term\"}\n\n- two\n")
+    assert.is_false(para[3].in_code)
+  end)
+
+  it("keeps a fence aligned to a wide list marker a fence, info string and all", function()
+    -- "10. " puts content at column 4. Measuring from column 0 would reject
+    -- the delimiter as over-indented and silently drop the language.
+    local lines = scanner.scan("10. item ten\n\n    ```python\n    sample\n    ```\n")
+    assert.equals("open", lines[3].fence)
+    assert.equals("python", lines[3].info)
+    assert.is_true(lines[4].in_code)
+  end)
+
+  it("handles a fence inside a list inside a blockquote", function()
+    local lines = scanner.scan("> 1. item\n>\n>    ```\n>    sample\n>    ```\n")
+    assert.is_true(lines[4].in_code)
+  end)
+
+  it("resumes plain measurement after a blockquote ends", function()
+    local lines = scanner.scan("> quoted\n\n    sample\n")
+    assert.is_true(lines[3].in_code)
+  end)
+end)
+
+describe("scanner container-state isolation", function()
+  it("does not let a closed quoted fence clear a later top-level list", function()
+    -- The fence's blockquote depth outlived the fence, so a later top-level
+    -- line looked like it had left a container and cleared the list's content
+    -- column -- turning that item's lazy continuation into code.
+    local lines = scanner.scan("> ```\n> x\n> ```\n\n1. item\n\n    {ix: \"term\"}\n")
+    assert.is_false(lines[7].in_code)
+  end)
+
+  it("measures a list marker whose gap is a tab", function()
+    -- pandoc reads "1.<tab>item" as a list, so its content column is 4 and a
+    -- five-column line is a continuation, not code. Counting bytes instead of
+    -- expanding the tab put the content column at 0 and called it code.
+    local continuation = scanner.scan("1.\titem\n\n\t {ix: \"term\"}\n")
+    assert.is_false(continuation[3].in_code)
+
+    local code = scanner.scan("1.\titem\n\n\t\t sample\n")
+    assert.is_true(code[3].in_code)
+  end)
+
+  it("measures a bullet marker whose gap is a tab", function()
+    local lines = scanner.scan("-\titem\n\n\t {ix: \"term\"}\n")
+    assert.is_false(lines[3].in_code)
+  end)
+
+  it("replays list context correctly when an unclosed fence reverts", function()
+    -- The stray ``` is not a fence, so "1. item" is a lazy continuation of
+    -- the paragraph it starts rather than a list -- no content column is
+    -- opened, and the four-space line after the blank is ordinary top-level
+    -- indented code. Verified against pandoc, which emits exactly that Para
+    -- plus CodeBlock pair.
+    local lines = scanner.scan("```\n1. item\n\n    {ix: \"term\"}\n")
+    assert.is_false(lines[1].in_code)
+    assert.is_false(lines[2].in_code)
+    assert.is_true(lines[4].in_code)
+  end)
+end)
+
+describe("scanner tilde fences", function()
+  -- The Markua spec supports tildes as a fence delimiter: "You can also insert
+  -- an inline resource using three or more tildes (`~`) as the delimiter,
+  -- instead of the more typical backticks". pandoc only honours that with the
+  -- `fenced_code_blocks` extension, which the reader's TARGET_FORMAT must
+  -- therefore carry -- without it a legitimate ~~~ block parses as prose with
+  -- Subscript artifacts, and every writer renders it wrong.
+  it("treats a tilde fence as code, like a backtick fence", function()
+    local lines = scanner.scan("~~~python\nsample\n~~~\n\nafter\n")
+    assert.equals("open", lines[1].fence)
+    assert.equals("python", lines[1].info)
+    assert.is_true(lines[2].in_code)
+    assert.equals("close", lines[3].fence)
+    assert.is_false(lines[5].in_code)
+  end)
+
+  it("recognises a tilde fence inside a list item and a blockquote", function()
+    local list = scanner.scan("- item\n\n  ~~~lua\n  sample\n  ~~~\n")
+    assert.is_true(list[4].in_code)
+
+    local quoted = scanner.scan("> ~~~\n> sample\n> ~~~\n")
+    assert.is_true(quoted[2].in_code)
+  end)
+
+  it("does not let a backtick delimiter close a tilde fence", function()
+    local lines = scanner.scan("~~~text\n```\nstill code\n~~~\nout\n")
+    assert.is_true(lines[2].in_code)
+    assert.is_true(lines[3].in_code)
+    assert.equals("close", lines[4].fence)
+    assert.is_false(lines[5].in_code)
+  end)
+end)
+
+-- Boundary cases surfaced by mutation testing: each of these fails if the
+-- named constant or comparison drifts, and each expectation is pandoc's own
+-- answer under the reader's target format.
+describe("scanner boundary arithmetic", function()
+  it("pins the tab stop at four columns", function()
+    -- "- item" puts content at column 2, so code needs column 6. One tab
+    -- reaches column 4 -- a continuation. At a tab stop of 8 it would reach 8
+    -- and be misread as code, silently dropping the attribute.
+    local lines = scanner.scan("- item\n\n\t{ix: \"term\"}\n")
+    assert.is_false(lines[3].in_code)
+  end)
+
+  it("does not treat a four-column-indented delimiter as a fence", function()
+    -- A tab-indented ``` is indented code, not a fence. If the fence check
+    -- accepted four columns, these two lines would pair up and swallow the
+    -- prose between them.
+    local lines = scanner.scan("Consider:\n\n\t```\nActual prose.\n\t```\n\nDone.\n")
+    assert.is_nil(lines[3].fence)
+    assert.is_false(lines[4].in_code)
+  end)
+
+  it("does not close a fence on a delimiter at a deeper blockquote depth", function()
+    -- A code sample quoting a transcript can contain "> ```" as literal text.
+    local lines = scanner.scan("```\ncode one\n> ```\nstill code\n```\nafter\n")
+    assert.is_true(lines[3].in_code)
+    assert.is_true(lines[4].in_code)
+    assert.equals("close", lines[5].fence)
+    assert.is_false(lines[6].in_code)
+  end)
+
+  it("does not re-anchor on a marker-shaped line inside indented code", function()
+    -- Eight columns under a two-column item is code, and the fact that it
+    -- starts with "- " must not make it a new nesting level.
+    local lines = scanner.scan("- outer\n\n        - deep\n")
+    assert.is_true(lines[3].in_code)
+  end)
+
+  it("restores the enclosing item's column when a nested list dedents", function()
+    -- "10. " puts content at column 4 and the nested "- " at column 6. A line
+    -- back at column 4 is a lazy continuation of the OUTER item, not code --
+    -- resetting to top level instead made it code and dropped the attribute.
+    local para = scanner.scan("10. outer\n\n    - nested\n\n    {ix: \"term\"}\n")
+    assert.is_false(para[5].in_code)
+
+    -- The nested "- " sits at content column 6, so code needs column 10 --
+    -- eight columns is still a continuation of the nested item. Verified
+    -- against pandoc, which emits a CodeBlock at ten columns and none at eight.
+    local still_para = scanner.scan("10. outer\n\n    - nested\n\n        sample\n")
+    assert.is_false(still_para[5].in_code)
+
+    local code = scanner.scan("10. outer\n\n    - nested\n\n          sample\n")
+    assert.is_true(code[5].in_code)
+  end)
+
+  it("counts a tab after a blockquote marker in columns, not bytes", function()
+    -- The marker takes one column of the tab's expansion; the rest is real
+    -- indentation. Eating the whole tab byte measured two columns short.
+    local code = scanner.scan("> quoted\n>\n>\t  sample\n")
+    assert.is_true(code[3].in_code)
+
+    local para = scanner.scan("> quoted\n>\n>\t{ix: \"term\"}\n")
+    assert.is_false(para[3].in_code)
+  end)
+end)
+
+describe("scanner list-start rules", function()
+  it("does not let a list marker interrupt an open paragraph", function()
+    -- pandoc reads "para" then "1. item" as one lazy paragraph, so no list
+    -- opens and the indented line after the blank is ordinary code. Treating
+    -- the marker as a list start hid that code block behind a phantom item.
+    local ordered = scanner.scan("para\n1. item\n\n    sample\n")
+    assert.is_true(ordered[4].in_code)
+
+    local bullet = scanner.scan("para\n- item\n\n    sample\n")
+    assert.is_true(bullet[4].in_code)
+  end)
+
+  it("still opens a list after a blank line or a heading", function()
+    local after_blank = scanner.scan("para\n\n1. item\n\n    {ix: \"term\"}\n")
+    assert.is_false(after_blank[5].in_code)
+
+    -- A list may follow a heading with no blank line, so the paragraph gate
+    -- must not key on blankness alone.
+    local after_heading = scanner.scan("# Heading\n- item\n\n      sample\n")
+    assert.is_true(after_heading[4].in_code)
+  end)
+
+  it("treats a thematic break as a rule, not a list item", function()
+    -- "- - -" matches the bullet pattern but pandoc emits HorizontalRule.
+    for _, rule in ipairs({ "- - -", "* * *", "___" }) do
+      local lines = scanner.scan("para\n\n" .. rule .. "\n\n    sample\n")
+      assert.is_true(lines[5].in_code, "expected code after " .. rule)
+    end
+  end)
 end)
 ```
 
@@ -533,23 +1037,50 @@ Create `src/markua/scanner.lua`:
 -- with '{', which a naive attribute-list match would corrupt.
 local M = {}
 
--- How deep a line is indented, and the text with that indent removed.
-local function indent_of(line)
-  local spaces = line:match("^( *)")
-  return #spaces
+local TAB_STOP = 4
+
+-- Display column of the byte at `stop`, expanding tabs to 4-column stops
+-- (CommonMark's rule, verified against pandoc 3.10.1). Everything that needs a
+-- column measures through here, so the fence check, the indented-code check
+-- and the list-marker gap can never drift apart.
+local function column_at(text, stop)
+  local column = 0
+  for i = 1, stop - 1 do
+    if text:sub(i, i) == "\t" then
+      column = column - (column % TAB_STOP) + TAB_STOP
+    else
+      column = column + 1
+    end
+  end
+  return column
 end
 
+-- Column width of a line's leading whitespace. Matching only spaces would
+-- score a tab as zero, which keeps a tab-indented "\t```" a fence and a
+-- tab-indented "\t{timeout: 30}" prose -- both wrong: pandoc parses the first
+-- as an indented code block and the second as a CodeBlock.
+local function indent_columns(line)
+  return column_at(line, #line:match("^[ \t]*") + 1)
+end
+
+-- The two fence markers, as a table rather than chained matches: Lua patterns
+-- have no alternation, so every multi-alternative match in this reader is an
+-- explicit loop over a table of patterns.
+local FENCE_PATTERNS = { "^(```+)(.*)$", "^(~~~+)(.*)$" }
+
 -- Returns marker and info string if the line opens or closes a fence.
--- CommonMark allows a fence to be indented up to three spaces; at four it is
--- an indented code block instead, which is handled separately below.
+-- Expects content with the container prefix and indentation already stripped:
+-- the caller owns the 0-3 column rule, because only it knows the enclosing
+-- list or blockquote's content column, and a raw-indentation check here would
+-- get that wrong the moment a container shifted it.
 local function fence_parts(line)
-  if indent_of(line) > 3 then
-    return nil
-  end
   local body = line:gsub("^ *", "")
-  local marker, info = body:match("^(```+)(.*)$")
-  if not marker then
-    marker, info = body:match("^(~~~+)(.*)$")
+  local marker, info
+  for _, pattern in ipairs(FENCE_PATTERNS) do
+    marker, info = body:match(pattern)
+    if marker then
+      break
+    end
   end
   if not marker then
     return nil
@@ -561,61 +1092,260 @@ local function is_blank(line)
   return line:match("^%s*$") ~= nil
 end
 
+-- Normalize CRLF and lone-CR line endings to LF before splitting, so no
+-- downstream module -- most of which anchor Lua patterns on "$" or "\n" --
+-- has to special-case a carriage return. CRLF must be substituted first: a
+-- lone-CR pass run first would collapse "\r\n" into "\n\n", inventing a
+-- blank line the source never had.
+local function normalize_newlines(text)
+  text = text:gsub("\r\n", "\n")
+  text = text:gsub("\r", "\n")
+  return text
+end
+
+-- Strip a blockquote prefix, returning its depth and the content after it.
+-- CommonMark allows up to three spaces before each ">" and swallows one
+-- optional space after it. Without this the scanner is blind to every fence
+-- and indented block inside a quote: pandoc parses "> ```python" as a real
+-- CodeBlock, while a raw-line scanner sees prose and lets a later transform
+-- rewrite the sample -- the corruption this module exists to prevent, just
+-- one container deeper.
+local function strip_blockquote(line)
+  local depth, rest, column = 0, line, 0
+  while true do
+    local indent, tail = rest:match("^( ? ? ?)>(.*)$")
+    if not indent then
+      return depth, rest
+    end
+    column = column + #indent + 1          -- past the ">" itself
+    -- The marker swallows one optional space. A tab is not one space: it
+    -- expands to the next 4-column stop, the marker takes one column of that
+    -- expansion, and the remainder is real indentation. Eating the whole tab
+    -- byte instead loses those columns, so "> " + tab + two spaces measured 2
+    -- columns here while pandoc measured 4 and made it a CodeBlock.
+    local first = tail:sub(1, 1)
+    if first == "\t" then
+      local width = TAB_STOP - (column % TAB_STOP)
+      rest = (" "):rep(width - 1) .. tail:sub(2)
+    elseif first == " " then
+      rest = tail:sub(2)
+      column = column + 1
+    else
+      rest = tail
+    end
+    depth = depth + 1
+  end
+end
+
+-- Content column of a list item's body, or nil when the line starts no item.
+-- A bullet or ordered marker shifts where that item's content begins, and
+-- CommonMark measures its nested code from there -- so "1. item" followed by
+-- a four-space line is a lazy paragraph continuation (content column 3, and
+-- 4 < 3 + 4), not code. Measuring from column 0 instead made the scanner
+-- report that line as code and skip a Markua attribute an author indented by
+-- habit under a numbered step. The gap after the marker may be a tab, which
+-- pandoc still reads as a list, so both the indent and the gap expand through
+-- the tab-stop rule rather than counting bytes.
+local LIST_MARKERS = { "^([ \t]*)([-+*])([ \t]+)", "^([ \t]*)(%d+[.)])([ \t]+)" }
+
+-- A thematic break is not a list, even though "- - -" matches the bullet
+-- pattern. pandoc emits HorizontalRule for it, so treating it as a list start
+-- opened a phantom item whose content column then hid a real code block.
+local THEMATIC_CHARS = { ["-"] = true, ["*"] = true, ["_"] = true }
+
+local function is_thematic_break(rest)
+  local squeezed = rest:gsub("[ \t]", "")
+  if #squeezed < 3 or not THEMATIC_CHARS[squeezed:sub(1, 1)] then
+    return false
+  end
+  return squeezed:gsub("%" .. squeezed:sub(1, 1), "") == ""
+end
+
+local function list_content_column(rest, thematic)
+  if thematic then
+    return nil
+  end
+  for _, pattern in ipairs(LIST_MARKERS) do
+    local indent, marker, gap = rest:match(pattern)
+    if indent then
+      return column_at(rest, #indent + #marker + #gap + 1)
+    end
+  end
+  return nil
+end
+
+-- Re-run the indented-code rule over a range whose fence turned out never to
+-- close. Same rules as the main loop, so a reverted range is classified
+-- exactly as if the stray fence delimiter had never been treated as one.
+local function reclassify(records, facts, from, to)
+  local indented = false
+  local prev_blank = from > 1 and facts[from - 1].blank or true
+  for i = from, to do
+    local fact = facts[i]
+    local in_code = false
+    if indented then
+      if fact.blank or fact.relative >= 4 then
+        in_code = true
+      else
+        indented = false
+      end
+    elseif prev_blank and not fact.blank and fact.relative >= 4 then
+      indented, in_code = true, true
+    end
+    records[i].in_code = in_code
+    records[i].fence = nil
+    records[i].info = nil
+    prev_blank = fact.blank
+  end
+end
+
 function M.scan(text)
-  local lines = {}
-  local open_marker = nil
-  local indented = false      -- inside a four-space indented code block
+  text = normalize_newlines(text)
+
+  local records, facts = {}, {}
+  local open_marker, open_depth, open_index = nil, 0, nil
+  local indented = false      -- inside a four-column indented code block
   local prev_blank = true     -- start of document counts as a blank
+  -- A stack, not a single column: dedenting out of a nested item returns to
+  -- the *enclosing* item's content column, not to top level. Resetting to 0
+  -- made "10. outer" / "    - nested" / "    {ix: ...}" read as code, where
+  -- pandoc keeps that last line a lazy continuation of the outer item.
+  local list_stack = {}       -- { { column = n, depth = n }, ... }, innermost last
+  -- A list marker cannot interrupt an open paragraph in this dialect: pandoc
+  -- reads "para" then "1. item" as one lazy paragraph, so treating it as a
+  -- list start opened a phantom item whose content column then reported a
+  -- following indented code block as prose. Only a *top-level* open is gated;
+  -- nesting inside an already-open list is unaffected.
+  local in_paragraph = false
   local number = 0
 
+  -- The "text .. \n" split (and the empty trailing record it produces for
+  -- newline-terminated input) is load-bearing, not an off-by-one: it is what
+  -- makes join(records, "\n") reproduce the input exactly (R10). Every
+  -- transform stage scans and rejoins, so an exact round trip is what stops
+  -- trailing newlines from drifting across stages. Do not trim it. Its one
+  -- consequence: that trailing record's `number` counts one past the
+  -- document's last real line, so a caller reporting an error position from
+  -- `record.number` must not assume every record names a line an author can
+  -- open.
   for line in (text .. "\n"):gmatch("(.-)\n") do
     number = number + 1
-    local blank = is_blank(line)
-    local marker, info = fence_parts(line)
+
+    -- Everything below measures the line's *content*, not its raw text: the
+    -- blockquote prefix is stripped first, then indentation is taken relative
+    -- to the enclosing list item's content column. A fence or indented block
+    -- means the same thing at any container depth, so resolving the prefix
+    -- once here keeps one rule instead of one per container.
+    local depth, rest = strip_blockquote(line)
+
+    -- Blankness is a property of the content, not the raw line: inside a
+    -- quote, a bare ">" is the blank line that separates blocks.
+    local blank = is_blank(rest)
+
+    -- Leaving a blockquote ends any list opened inside it. That is the list's
+    -- own container depth, not the fence's: keying this off open_depth let a
+    -- closed quoted fence leave a stale depth behind, which then cleared a
+    -- later top-level list and misread its lazy continuation as code. A blank
+    -- line ends nothing -- a loose list keeps its item open across one.
+    while #list_stack > 0 and list_stack[#list_stack].depth > depth do
+      list_stack[#list_stack] = nil
+    end
+    local list_column = #list_stack > 0 and list_stack[#list_stack].column or 0
+
+    local column = indent_columns(rest)
+    -- Computed once and reused by both the list gate and the paragraph gate
+    -- below; it squeezes the whole line, so doing it twice per prose line is
+    -- the one duplicated scan in this loop.
+    local thematic = not blank and is_thematic_break(rest)
+
+    if not blank and not open_marker then
+      local started = list_content_column(rest, thematic)
+      if started and #list_stack == 0 and in_paragraph then
+        started = nil        -- a marker cannot interrupt an open paragraph
+      end
+      if started and column <= list_column + 3 then
+        list_stack[#list_stack + 1] = { column = started, depth = depth }
+      elseif column < list_column then
+        -- Dedent: pop only the items this line has actually left.
+        while #list_stack > 0 and column < list_stack[#list_stack].column do
+          list_stack[#list_stack] = nil
+        end
+      end
+      list_column = #list_stack > 0 and list_stack[#list_stack].column or 0
+    end
+
+    -- A fence sits 0-3 columns past the container's content column; at four
+    -- it is indented code instead. Measuring the stripped content means one
+    -- fence rule serves every container depth.
+    local relative = column - list_column
+    local marker, info
+    if relative >= 0 and relative <= 3 then
+      marker, info = fence_parts((rest:gsub("^%s*", "")))
+    end
+
     local record = { text = line, number = number, in_code = open_marker ~= nil }
+    records[number] = record
+    facts[number] = { blank = blank, relative = relative }
 
     if open_marker then
-      -- Inside a fence: only a matching closing marker matters.
-      if marker and marker:sub(1, 1) == open_marker:sub(1, 1)
+      -- Inside a fence: only a matching closer at the same blockquote depth
+      -- counts. A shallower depth means the quote ended first, which under
+      -- this reader's target format means the opener was never a fence.
+      if depth < open_depth then
+        reclassify(records, facts, open_index, number - 1)
+        open_marker, open_index, open_depth = nil, nil, 0
+        record.in_code = false
+      elseif marker and depth == open_depth and marker:sub(1, 1) == open_marker:sub(1, 1)
          and #marker >= #open_marker and info == "" then
         record.fence = "close"
-        open_marker = nil
+        -- Clear the depth with the fence: a stale open_depth outlives the
+        -- construct it described and corrupts unrelated later state.
+        open_marker, open_index, open_depth = nil, nil, 0
       end
     elseif marker then
-      open_marker = marker
+      open_marker, open_depth, open_index = marker, depth, number
       indented = false
       record.in_code = true
       record.fence = "open"
       record.info = info
     else
-      -- An indented code block starts on a four-space indent after a blank
-      -- line, and runs until a non-blank line dedents. Without this, a code
-      -- sample such as "    {timeout: 30}" reads as a Markua attribute list
-      -- and gets rewritten -- the same corruption fences protect against.
+      -- An indented code block starts four columns past the container's
+      -- content column after a blank line, and runs until a non-blank line
+      -- dedents. Without this, a code sample such as "    {timeout: 30}"
+      -- reads as a Markua attribute list and gets rewritten -- the same
+      -- corruption fences protect against.
       if indented then
         if blank then
           record.in_code = true          -- blank lines do not end the block
-        elseif indent_of(line) >= 4 then
+        elseif relative >= 4 then
           record.in_code = true
         else
           indented = false
         end
-      elseif prev_blank and not blank and indent_of(line) >= 4 then
+      elseif prev_blank and not blank and relative >= 4 then
         indented = true
         record.in_code = true
       end
     end
 
-    if not blank then
-      prev_blank = false
+    prev_blank = blank
+    if blank or record.in_code or thematic or rest:match("^#") then
+      in_paragraph = false
     else
-      prev_blank = true
+      in_paragraph = true
     end
-
-    lines[#lines + 1] = record
   end
 
-  return lines
+  -- A fence still open at the end of the document never closed, so under this
+  -- reader's target format (markdown_strict plus extensions, not commonmark)
+  -- its delimiter was ordinary text all along. commonmark would run the block
+  -- to EOF instead; following the format actually handed to pandoc.read is
+  -- what keeps the scanner's answer and pandoc's the same.
+  if open_marker then
+    reclassify(records, facts, open_index, number)
+  end
+
+  return records
 end
 
 return M
@@ -624,7 +1354,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/scanner_spec.lua`
-Expected: PASS, 7 successes
+Expected: PASS, 44 successes
 
 - [ ] **Step 5: Commit**
 
@@ -655,7 +1385,30 @@ git commit -m "feat: fence-aware line scanner"
 Create `test/attributes_spec.lua`:
 
 ```lua
+-- Spec for the attribute-list parser (src/markua/attributes.lua).
+--
+-- Written before the module exists: this unit's TDD cycle starts red. Run with
+-- `busted test/attributes_spec.lua` from the repo root -- require("src.markua.attributes")
+-- resolves through .busted's lpath only from there.
+--
+-- The first six `describe("attributes.parse", ...)` scenarios and the
+-- to_pandoc_attr id/classes/keyvals scenario are docs/plan.md Task 3 Step 1
+-- verbatim. Everything below them covers the KTD4, KTD8, KTD5, and R17
+-- corrections this plan makes to that reference module.
 local attributes = require("src.markua.attributes")
+
+-- Builds the parsed-attribute shape directly, without going through parse --
+-- these cases exercise to_pandoc_attr on values parse would never produce, or
+-- would decorate with its own file/line provenance.
+local function attr(fields)
+  fields = fields or {}
+  return {
+    id = fields.id,
+    classes = fields.classes or {},
+    keyvals = fields.keyvals or {},
+    bare = fields.bare or {},
+  }
+end
 
 describe("attributes.parse", function()
   it("parses key/value pairs", function()
@@ -678,6 +1431,9 @@ describe("attributes.parse", function()
   it("promotes class: to the classes list", function()
     local a = attributes.parse("{class: part}", "f.md", 1)
     assert.same({ "part" }, a.classes)
+    -- The negative half is the whole point of promoting it: without this,
+    -- a refactor that also wrote the pair through to keyvals stays green.
+    assert.is_nil(a.keyvals["class"])
   end)
 
   it("collects bare words", function()
@@ -697,6 +1453,228 @@ describe("attributes.to_pandoc_attr", function()
     local a = attributes.parse('{#x, class: tip, title: "A B"}', "f.md", 1)
     assert.equals('{#x .tip title="A B"}', attributes.to_pandoc_attr(a))
   end)
+
+  it("single-quotes a value containing a double quote (KTD4)", function()
+    -- The reader's target format is markdown_strict plus extensions, which
+    -- leaves all_symbols_escapable off, so `\"` is NOT an escape there and
+    -- {title="He said \"hi\""} fails to parse -- pandoc abandons the whole
+    -- construct and renders the ::: delimiters as literal text. Verified
+    -- against pandoc 3.10.1 under that exact format: the single-quoted form
+    -- parses back to the value `He said "hi"`.
+    local a = attr({ keyvals = { title = 'He said "hi"' } })
+    assert.equals([[{title='He said "hi"'}]], attributes.to_pandoc_attr(a))
+  end)
+
+  it("keeps double quotes for a value containing only an apostrophe", function()
+    local a = attr({ keyvals = { title = "it's" } })
+    assert.equals([[{title="it's"}]], attributes.to_pandoc_attr(a))
+  end)
+
+  it("raises for a value carrying both quote characters", function()
+    -- Neither quoting style can enclose it and no escape is available, so
+    -- this is unrepresentable rather than silently corrupted.
+    local a = attr({ keyvals = { title = [[He said "hi" and it's]] } })
+    assert.is_false(pcall(attributes.to_pandoc_attr, a, "f.md", 3))
+  end)
+
+  it("escapes a backslash in a value (KTD4)", function()
+    -- pandoc spells a literal backslash as title="a\\b"; escape \ before "
+    -- so the quote pass does not double-escape the backslashes it introduces.
+    local a = attr({ keyvals = { path = "a\\b" } })
+    assert.equals('{path="a\\\\b"}', attributes.to_pandoc_attr(a))
+  end)
+
+  it("orders emitted keyvals deterministically across repeated calls (R18)", function()
+    local a = attr({ keyvals = { zeta = "1", alpha = "2" } })
+    local first = attributes.to_pandoc_attr(a)
+    local second = attributes.to_pandoc_attr(a)
+    assert.equals(first, second)
+    assert.equals('{alpha="2" zeta="1"}', first)
+  end)
+end)
+
+describe("attributes.parse index variant", function()
+  it("parses the widespread {i: ...} variant alongside {ix: ...}", function()
+    local a = attributes.parse('{i: "B-tree"}', "f.md", 1)
+    assert.equals("B-tree", a.keyvals["i"])
+  end)
+end)
+
+describe("attributes.parse fenced-blurb bare words (KTD5, R16)", function()
+  it("yields bare = {'/blurb'} so the fenced-blurb closer survives for blocks.lua", function()
+    local a = attributes.parse("{/blurb}", "f.md", 1)
+    assert.same({ "/blurb" }, a.bare)
+  end)
+
+  it("lands a field with an unparseable key in bare verbatim rather than dropping it", function()
+    -- A space inside the key breaks the `^([%w%-_]+)%s*:%s*(.*)$` match, so
+    -- this is neither a key/value pair, an id, nor a class shortcut.
+    local a = attributes.parse("{bad key: value}", "f.md", 1)
+    assert.same({ "bad key: value" }, a.bare)
+  end)
+end)
+
+describe("attributes.parse backslash-parity tokenizing (KTD8, R14a)", function()
+  it("does not split on a comma following a backslash-escaped quote inside a value", function()
+    local a = attributes.parse('{title: "She said \\"hi, there\\""}', "f.md", 1)
+    assert.equals('She said \\"hi, there\\"', a.keyvals["title"])
+    assert.same({}, a.bare)
+  end)
+end)
+
+describe("attributes.parse errors (R17)", function()
+  it("raises a structured error carrying file and line when the text is not an attribute list", function()
+    local ok, err = pcall(attributes.parse, "not braces", "f.md", 7)
+    assert.is_false(ok)
+    assert.equals("f.md", err.file)
+    assert.equals(7, err.line)
+  end)
+end)
+
+describe("attributes.parse unterminated-quote recovery", function()
+  -- Follows pandoc: an unclosed quote does not delimit, so it stays literal in
+  -- the value and the following field still parses. Erroring instead would
+  -- refuse `{title: 5" pipe}`, which is valid today.
+  it("keeps the stray quote in the value and still separates the next field", function()
+    local a = attributes.parse('{title: "abc, class: tip}', "f.md", 1)
+    assert.equals('"abc', a.keyvals["title"])
+    assert.same({ "tip" }, a.classes)
+  end)
+
+  it("leaves a literal quote inside an unquoted value alone", function()
+    local a = attributes.parse('{title: 5" pipe}', "f.md", 1)
+    assert.equals('5" pipe', a.keyvals["title"])
+  end)
+
+  it("still groups a comma inside a balanced quoted value", function()
+    local a = attributes.parse('{ix: "B-tree, invention of"}', "f.md", 1)
+    assert.equals("B-tree, invention of", a.keyvals["ix"])
+    assert.same({}, a.bare)
+  end)
+end)
+
+describe("attributes.to_pandoc_attr name representability", function()
+  -- pandoc has no escape syntax for an id or class: whitespace, a quote, a
+  -- brace, or an empty name makes it reject the whole attribute block and
+  -- render it as literal braces -- the output AGENTS.md forbids.
+  it("raises with file and line for an id that pandoc cannot read back", function()
+    local parsed = attributes.parse("{#my id}", "f.md", 7)
+    local ok, err = pcall(attributes.to_pandoc_attr, parsed, "f.md", 7)
+    assert.is_false(ok)
+    assert.equals("f.md", err.file)
+    assert.equals(7, err.line)
+  end)
+
+  it("raises for a class that pandoc cannot read back", function()
+    local parsed = attributes.parse("{.a class}", "f.md", 9)
+    local ok, err = pcall(attributes.to_pandoc_attr, parsed, "f.md", 9)
+    assert.is_false(ok)
+    assert.equals(9, err.line)
+  end)
+
+  it("accepts the punctuation pandoc does accept, including a leading digit", function()
+    local a = attributes.parse("{#3things, .with-dash, .with_us, .with.dot}", "f.md", 1)
+    assert.equals("{#3things .with-dash .with_us .with.dot}", attributes.to_pandoc_attr(a))
+  end)
+
+  -- The accepted shapes are pandoc's own grammar, from Readers/Markdown.hs:
+  --   identifierAttr = char '#' >> many1 (alphaNum <|> oneOf "-_:.")
+  --   identifier     = letter >> many (alphaNum <|> oneOf "-_:.")   -- class
+  -- An id may therefore start with a digit or a dash; a class may not.
+  it("rejects a class beginning with a digit, which pandoc will not parse", function()
+    local a = attr({ classes = { "3things" } })
+    assert.is_false(pcall(attributes.to_pandoc_attr, a, "f.md", 1))
+  end)
+
+  it("rejects a name carrying punctuation outside pandoc's set", function()
+    for _, name in ipairs({ "a&b", "a%b", "a#b", "a<b>c" }) do
+      local a = attr({ id = name })
+      assert.is_false(pcall(attributes.to_pandoc_attr, a, "f.md", 1),
+        "expected " .. name .. " to be rejected as an id")
+    end
+  end)
+
+  it("accepts colon, dot and a leading dash in an id", function()
+    local a = attr({ id = "a:b.c" })
+    assert.equals("{#a:b.c}", attributes.to_pandoc_attr(a))
+    local dashed = attr({ id = "--x" })
+    assert.equals("{#--x}", attributes.to_pandoc_attr(dashed))
+  end)
+
+  it("accepts a non-ASCII name, which pandoc's Unicode alphaNum allows", function()
+    local a = attr({ id = "caf\195\169", classes = { "na\195\175ve" } })
+    assert.equals("{#caf\195\169 .na\195\175ve}", attributes.to_pandoc_attr(a))
+  end)
+
+  it("splits a class value on whitespace the way pandoc does", function()
+    -- pandoc's keyValAttr: "class" -> cs ++ T.words val
+    local a = attributes.parse('{class: "tip wide"}', "f.md", 1)
+    assert.same({ "tip", "wide" }, a.classes)
+    assert.equals("{.tip .wide}", attributes.to_pandoc_attr(a))
+  end)
+end)
+
+describe("attributes.parse duplicate keys", function()
+  -- Markua spec, "Attribute Keys": "If a key is duplicated in an attribute
+  -- list, the first key value is used and subsequent ones are ignored. A
+  -- Markua Processor should add a warning in its list of warnings, which are
+  -- *not* output in the output itself."
+  -- parse takes an optional sink for these warnings, so the spec asserts them
+  -- instead of printing to stderr.
+  local function sink()
+    local written = {}
+    return { write = function(_, ...) written[#written + 1] = table.concat({ ... }) end },
+           function() return table.concat(written) end
+  end
+
+  it("keeps the first occurrence of a repeated key and warns", function()
+    local out, text = sink()
+    local a = attributes.parse('{title: "first", title: "second"}', "f.md", 1, out)
+    assert.equals("first", a.keyvals["title"])
+    assert.is_truthy(text():find("duplicate attribute key"))
+    assert.is_truthy(text():find("f.md:1"))
+  end)
+
+  it("applies the same first-wins rule to a repeated class key", function()
+    -- `class` is an ordinary attribute key, so it does not accumulate. The
+    -- classes list exists for the `.name` shortcut, a different syntax.
+    local out = sink()
+    local a = attributes.parse("{class: tip, class: wide}", "f.md", 1, out)
+    assert.same({ "tip" }, a.classes)
+  end)
+
+  it("keeps the first id and ignores a later one", function()
+    local out, text = sink()
+    local a = attributes.parse("{#first, #second}", "f.md", 1, out)
+    assert.equals("first", a.id)
+    -- Assert the warning actually fires: Task 4 consumes this sink to build
+    -- the warning list the spec requires, so a silently dropped warning here
+    -- would ship undetected.
+    assert.is_truthy(text():find("duplicate id"))
+  end)
+
+  it("still accumulates distinct classes from the .name shortcut", function()
+    local a = attributes.parse("{.tip, .wide}", "f.md", 1)
+    assert.same({ "tip", "wide" }, a.classes)
+  end)
+end)
+
+describe("attributes parse-to-emit composition", function()
+  it("still shows the composition trap when parse is chained into to_pandoc_attr", function()
+    -- parse yields Markua-level text with the source escape intact, and
+    -- to_pandoc_attr renders what it is given, so chaining them without an
+    -- unescape step carries the backslashes through. Whichever consumer
+    -- first needs the round trip owns that step.
+    local parsed = attributes.parse('{title: "a \\"b\\""}', "f.md", 1)
+    assert.equals('a \\"b\\"', parsed.keyvals["title"])
+    -- The value contains a double quote, so it emits single-quoted.
+    assert.equals([[{title='a \\"b\\"'}]], attributes.to_pandoc_attr(parsed))
+  end)
+
+  it("round-trips a semantic value that carries no source escape", function()
+    local parsed = attributes.parse('{title: "Chapter 3"}', "f.md", 1)
+    assert.equals('{title="Chapter 3"}', attributes.to_pandoc_attr(parsed))
+  end)
 end)
 ```
 
@@ -713,7 +1691,20 @@ Create `src/markua/attributes.lua`:
 --- Parse Markua attribute lists: {key: value, "quoted", #id, .class}.
 --
 -- Pure syntax. This module has no opinion about what any attribute means;
--- blocks.lua and resources.lua interpret them.
+-- blocks.lua and resources.lua interpret them. It never unescapes a source
+-- value -- `\"` in `parse`'s input stays `\"` verbatim in the parsed value.
+-- Consumers own rejecting bare words they do not recognize (e.g. an
+-- unparseable key, or a construct-specific word like "blurb"); this module
+-- only tokenizes.
+--
+-- `parse` and `to_pandoc_attr` are NOT inverses, and must not be chained
+-- directly on a value carrying a source escape. `parse` yields Markua-level
+-- text (`\"` still escaped); `to_pandoc_attr` expects semantic text and
+-- escapes what it is given, so feeding one straight into the other turns
+-- `She said \"hi\"` into a value pandoc reads back with literal backslashes.
+-- Whichever consumer first needs the round trip owns the unescape step
+-- between them; where that belongs is a Markua-spec question this module
+-- deliberately does not answer.
 local errors = require("src.markua.errors")
 
 local M = {}
@@ -727,12 +1718,55 @@ function M.is_attribute_line(text)
   return t:sub(1, 1) == "{" and t:sub(-1) == "}" and #t >= 2
 end
 
+-- Count the run of consecutive backslashes immediately before position i in
+-- body (1-indexed, exclusive of i itself). Used to decide whether the `"` at
+-- i is escaped: an odd count means the backslash run ends in an unescaped
+-- backslash that swallows this quote, so it does not toggle quote state.
+local function backslash_run_length(body, i)
+  local count = 0
+  local j = i - 1
+  while j >= 1 and body:sub(j, j) == "\\" do
+    count = count + 1
+    j = j - 1
+  end
+  return count
+end
+
 -- Split on commas that are not inside double quotes.
+--
+-- A `"` toggles quote state only when it is not escaped -- i.e. when it is
+-- preceded by an even number (including zero) of consecutive backslashes.
+-- Without this, `{title: "She said \"hi, there\""}` desyncs on the first
+-- escaped `"`: the naive every-quote-toggles version treats it as a closing
+-- quote, so the comma after it splits the field, truncating the value to
+-- `"She said \"hi` and inventing a spurious bare word `there\""`. This is
+-- tokenizing only -- the backslash stays in the field text verbatim; `parse`
+-- does not unescape it.
+--
+-- A quote that never closes does not delimit anything, so quote state is
+-- disabled for the whole body rather than left stuck on. Without this,
+-- `{title: "abc, class: tip}` swallows the following field: the comma stops
+-- separating and `class: tip` disappears into the title with no error. This
+-- follows pandoc, which recovers the same way -- `{#h title="abc class=tip}`
+-- yields the value `"abc` AND still applies the class `tip`, keeping the
+-- stray quote literally rather than rejecting the document. Erroring instead
+-- would refuse input that parses correctly today, such as `{title: 5" pipe}`.
+local function has_balanced_quotes(body)
+  local open = false
+  for i = 1, #body do
+    if body:sub(i, i) == '"' and backslash_run_length(body, i) % 2 == 0 then
+      open = not open
+    end
+  end
+  return not open
+end
+
 local function split_fields(body)
+  local quotes_delimit = has_balanced_quotes(body)
   local fields, buf, in_quote = {}, {}, false
   for i = 1, #body do
     local c = body:sub(i, i)
-    if c == '"' then
+    if c == '"' and quotes_delimit and backslash_run_length(body, i) % 2 == 0 then
       in_quote = not in_quote
       buf[#buf + 1] = c
     elseif c == "," and not in_quote then
@@ -751,14 +1785,26 @@ local function unquote(v)
   return inner or v
 end
 
-function M.parse(text, file, line)
+--- Parse an attribute list. `sink` is optional and only receives duplicate-key
+--- warnings; it is the seam a later caller uses to collect them into the
+--- warning list the Markua spec asks a Processor to keep, rather than writing
+--- each one straight to stderr.
+function M.parse(text, file, line, sink)
   local t = trim(text)
   local body = t:match("^{(.*)}$")
   if not body then
     errors.raise(file, line, "not an attribute list: " .. t)
   end
 
-  local parsed = { id = nil, classes = {}, keyvals = {}, bare = {} }
+  -- Carry the source position on the table itself. `to_pandoc_attr` raises
+  -- for a name pandoc cannot read back, but it is called later and elsewhere
+  -- than `parse`, so relying on every consumer to rethread file/line across
+  -- that gap loses the position exactly where the error needs it -- the two
+  -- draft consumers in docs/plan.md (Tasks 5 and 7) already call
+  -- `to_pandoc_attr(pending)` with no position, which would report
+  -- `nil:nil: id "..." cannot be represented` to an author.
+  local parsed = { id = nil, classes = {}, keyvals = {}, bare = {}, file = file, line = line }
+  local seen_keys = {}
 
   for _, field in ipairs(split_fields(body)) do
     local f = trim(field)
@@ -766,16 +1812,48 @@ function M.parse(text, file, line)
       local key, value = f:match("^([%w%-_]+)%s*:%s*(.*)$")
       if key then
         value = unquote(trim(value))
-        if key == "class" then
-          parsed.classes[#parsed.classes + 1] = value
+        if seen_keys[key] then
+          -- Markua spec, "Attribute Keys": "If a key is duplicated in an
+          -- attribute list, the first key value is used and subsequent ones
+          -- are ignored. A Markua Processor should add a warning in its list
+          -- of warnings, which are *not* output in the output itself." This
+          -- is a warning, not an error -- the document still has a defined
+          -- meaning -- so the later value is dropped and the author is told.
+          errors.warn(file, line, string.format("duplicate attribute key %q; first value kept", key), sink)
+        elseif key == "class" then
+          -- `class` is an ordinary attribute key, so the duplicate rule above
+          -- governs it too: a repeated class: does not accumulate. The
+          -- classes list exists for the `.name` shortcut, which is a
+          -- different syntax.
+          -- pandoc splits a class value on whitespace
+          -- ("class" -> cs ++ T.words val in keyValAttr), so `{class: "tip
+          -- wide"}` is two classes rather than one unrepresentable name.
+          seen_keys[key] = true
+          for word in value:gmatch("%S+") do
+            parsed.classes[#parsed.classes + 1] = word
+          end
         else
+          seen_keys[key] = true
           parsed.keyvals[key] = value
         end
       elseif f:sub(1, 1) == "#" then
-        parsed.id = f:sub(2)
+        -- Same first-wins rule; the spec asks for an error in the log rather
+        -- than a warning for a duplicate id, but the value still resolves, so
+        -- this reports without aborting.
+        if parsed.id ~= nil then
+          errors.warn(file, line, "duplicate id; first value kept", sink)
+        else
+          parsed.id = f:sub(2)
+        end
       elseif f:sub(1, 1) == "." then
         parsed.classes[#parsed.classes + 1] = f:sub(2)
       else
+        -- Neither key: value, #id, nor .class. This is not necessarily an
+        -- error: `blurb`, `frontmatter`, and `/blurb` are all legitimate
+        -- bare words whose meaning belongs to a later module (KTD5). A
+        -- consumer that does not recognize this word names it in the hard
+        -- error AGENTS.md requires; attributes.lua stays pure syntax and
+        -- does not guess.
         parsed.bare[#parsed.bare + 1] = f
       end
     end
@@ -784,21 +1862,101 @@ function M.parse(text, file, line)
   return parsed
 end
 
-function M.to_pandoc_attr(parsed)
+-- Render a value for pandoc's attribute syntax, choosing the quote character
+-- the way pandoc's keyValAttr can actually read back:
+--
+--   val <- enclosed (char '"')  (char '"')  litChar
+--      <|> enclosed (char '\'') (char '\'') litChar
+--      <|> ...
+--
+-- The reader's target format is markdown_strict plus extensions, which leaves
+-- all_symbols_escapable OFF, so only original Markdown's escapable set works.
+-- A backslash is in that set; a double quote is not. Verified against pandoc
+-- 3.10.1 under that exact format: {title="He said \"hi\""} does not parse --
+-- pandoc abandons the whole construct and renders the ::: delimiters as
+-- literal paragraph text -- while {title='He said "hi"'} parses to the value
+-- `He said "hi"`. Escaping the quote is what -f markdown accepts; measuring
+-- the format actually handed to pandoc.read is what caught the difference.
+--
+-- So the quote character carries the value instead of an escape: single
+-- quotes when it contains a double quote, double quotes otherwise. A value
+-- containing both is unrepresentable here and is a hard error rather than
+-- silent corruption.
+local function escape_backslashes(v)
+  return (v:gsub("\\", "\\\\"))
+end
+
+local function render_value(v, file, line)
+  local has_double, has_single = v:find('"', 1, true), v:find("'", 1, true)
+  if has_double and has_single then
+    errors.raise(file, line,
+      "attribute value carries both a single and a double quote, which pandoc's attribute syntax cannot express: " .. v)
+  end
+  local body = escape_backslashes(v)
+  if has_double then
+    return "'" .. body .. "'"
+  end
+  return '"' .. body .. '"'
+end
+
+-- An id or class has no escape syntax in pandoc's attribute block -- unlike a
+-- value, which quotes and backslashes can always carry. The accepted shapes
+-- are pandoc's own, from Readers/Markdown.hs:
+--
+--   identifierAttr = char '#' >> many1 (alphaNum <|> oneOf "-_:.")
+--   identifier     = letter >> many (alphaNum <|> oneOf "-_:.")   -- class
+--
+-- So an id may start with a digit but a class may not, and neither may contain
+-- anything else. Emitting a name outside that grammar does not merely lose the
+-- name: pandoc rejects the *entire* attribute block and renders it as literal
+-- text, so `{#a&b .3things}` leaks braces into the prose and drops every other
+-- attribute with it -- the "never pass through as literal braces into the
+-- output" failure AGENTS.md forbids. Verified against pandoc 3.10.1: `{#a&b}`,
+-- `{#a%b}` and `{.3things}` all come back as literal Str, while `{#3things}`,
+-- `{#a:b}`, `{#a.b}` and `{#caf\233}` parse.
+--
+-- Bytes >= 0x80 are accepted as name characters. pandoc's alphaNum is Unicode
+-- aware, so `café` and CJK ids are legal there; matching that exactly would
+-- mean a Unicode character-class table in pure Lua. Accepting the high range
+-- errs toward passing real author text through rather than falsely rejecting
+-- it, at the cost of not catching an exotic non-alphanumeric symbol.
+local ID_PATTERN = "^[%w%-_:.\128-\255]+$"
+local CLASS_PATTERN = "^[%a\128-\255][%w%-_:.\128-\255]*$"
+
+local function check_name(kind, name, file, line)
+  local pattern = kind == "class" and CLASS_PATTERN or ID_PATTERN
+  if not name:match(pattern) then
+    errors.raise(file, line, string.format("%s %q cannot be represented in a pandoc attribute", kind, name))
+  end
+end
+
+--- Render a parsed attribute list as a pandoc attribute block.
+--- `file` and `line` are optional and only position the error raised when an
+--- id or class cannot be represented.
+function M.to_pandoc_attr(parsed, file, line)
+  -- Fall back to the position parse recorded, so a caller that omits these
+  -- still produces an error naming the author's file and line.
+  file = file or parsed.file
+  line = line or parsed.line
   local parts = {}
   if parsed.id then
+    check_name("id", parsed.id, file, line)
     parts[#parts + 1] = "#" .. parsed.id
   end
   for _, c in ipairs(parsed.classes) do
+    check_name("class", c, file, line)
     parts[#parts + 1] = "." .. c
   end
+  -- Sorted keys are the determinism mechanism for R18: iterating pairs()
+  -- directly would order keyvals by Lua's internal hash order, which is not
+  -- guaranteed stable across runs.
   local keys = {}
   for k in pairs(parsed.keyvals) do
     keys[#keys + 1] = k
   end
   table.sort(keys)
   for _, k in ipairs(keys) do
-    parts[#parts + 1] = string.format('%s="%s"', k, parsed.keyvals[k])
+    parts[#parts + 1] = string.format("%s=%s", k, render_value(parsed.keyvals[k], file, line))
   end
   return "{" .. table.concat(parts, " ") .. "}"
 end
@@ -809,7 +1967,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/attributes_spec.lua`
-Expected: PASS, 7 successes
+Expected: PASS, 34 successes
 
 - [ ] **Step 5: Commit**
 
@@ -1948,7 +3106,7 @@ local TARGET_FORMAT = table.concat({
   "fenced_divs", "bracketed_spans", "header_attributes",
   "pipe_tables", "footnotes", "definition_lists",
   "strikeout", "superscript", "subscript",
-  "tex_math_dollars", "backtick_code_blocks", "fenced_code_attributes",
+  "tex_math_dollars", "backtick_code_blocks", "fenced_code_blocks", "fenced_code_attributes",
   "link_attributes", "smart",
 }, "+")
 
@@ -2172,6 +3330,16 @@ git commit -m "feat: lower index spans to Word XE index fields"
 **Files:**
 
 - Create: `src/filters/index-latex.lua`, `src/filters/index-docbook.lua`
+
+**Carried in from the Task 2/3 review — this task owns it.** XML types `xml:id`
+as an `NCName`, which may not begin with a digit, so `{#3things}` is a valid id
+for pandoc, HTML and LaTeX but invalid in DocBook and EPUB. pandoc's own DocBook
+writer passes such an id through unsanitized, so this is upstream behavior rather
+than something the reader introduces, and `attributes.lua` cannot decide it: the
+parser does not know the output format. The DocBook filter does. Decide here
+whether to sanitize the id, warn, or document it as an authoring constraint --
+and note that rejecting it outright would refuse documents the other three
+writers handle correctly.
 
 **Interfaces:**
 
