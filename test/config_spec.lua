@@ -138,6 +138,66 @@ describe("config.load_file", function()
     assert.is_string(err)
   end)
 
+  -- An override the reader does not recognize is a hard error, not a silent
+  -- no-op. A typo that changes nothing gives the author no signal at all.
+  describe("override validation", function()
+    it("rejects an unrecognized key by name", function()
+      local path = write_fixture([[return { callout_class = { "tip" } }]])
+      local overrides, err = config.load_file(path)
+      assert.is_nil(overrides)
+      assert.truthy(err:find("callout_class", 1, true))
+    end)
+
+    -- strict has its own channel. Reader() applies --lenient before it merges
+    -- the config file, so a file setting strict would silently cancel the flag
+    -- the user just passed. Point the author at the flag instead.
+    it("rejects strict and names the flag that sets it", function()
+      local path = write_fixture([[return { strict = false }]])
+      local overrides, err = config.load_file(path)
+      assert.is_nil(overrides)
+      assert.truthy(err:find("--lenient", 1, true))
+    end)
+
+    it("rejects a recognized key that is not a table", function()
+      local path = write_fixture([[return { callout_classes = "tip" }]])
+      local overrides, err = config.load_file(path)
+      assert.is_nil(overrides)
+      assert.truthy(err:find("callout_classes", 1, true))
+      assert.truthy(err:find("array of strings", 1, true))
+    end)
+
+    -- Element types are checked, not just the outer table: a list of numbers
+    -- would pass a bare type() check and then fail far away, inside a lookup.
+    it("rejects non-string entries inside a recognized key", function()
+      local path = write_fixture([[return { index_keys = { 1, 2 } }]])
+      local overrides, err = config.load_file(path)
+      assert.is_nil(overrides)
+      assert.truthy(err:find("index_keys", 1, true))
+      assert.truthy(err:find("array of strings", 1, true))
+    end)
+
+    -- The plausible author mistake: returning the class list itself rather
+    -- than a table naming which key it overrides.
+    it("rejects a bare list with no key names", function()
+      local path = write_fixture([[return { "tip", "warning" }]])
+      local overrides, err = config.load_file(path)
+      assert.is_nil(overrides)
+      assert.is_string(err)
+    end)
+
+    it("accepts a partial override", function()
+      local path = write_fixture([[return { callout_classes = { "tip" } }]])
+      assert.same({ "tip" }, config.load_file(path).callout_classes)
+    end)
+
+    it("accepts both recognized keys together", function()
+      local path = write_fixture([[return { callout_classes = { "tip" }, index_keys = { "ix" } }]])
+      local overrides = config.load_file(path)
+      assert.same({ "tip" }, overrides.callout_classes)
+      assert.same({ "ix" }, overrides.index_keys)
+    end)
+  end)
+
   -- Text mode only. Precompiled bytecode skips the parser entirely and is not
   -- something an author writes by hand, so refusing it costs nothing.
   it("refuses precompiled bytecode", function()

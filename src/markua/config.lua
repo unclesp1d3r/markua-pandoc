@@ -48,6 +48,74 @@ function M.merge(base, overrides)
   return out
 end
 
+-- What a config file may set, and the shape each key carries. A table rather
+-- than a branch chain, matching how scanner.lua holds its fence patterns: the
+-- recognized set is data, so adding a key is a one-line change here.
+local RECOGNIZED_KEYS = {
+  callout_classes = "array of strings",
+  index_keys = "array of strings",
+}
+
+-- Keys that reach cfg through some other channel, with the channel named. An
+-- author who guesses the config file deserves the right answer, not a bare
+-- "unrecognized" -- and silently accepting `strict` would be worse still,
+-- because Reader() applies --lenient before merging the file, so the file
+-- would quietly cancel the flag the user just passed.
+local REDIRECTED_KEYS = {
+  strict = "set it with --lenient rather than a config file",
+}
+
+-- Both recognized keys carry the same shape, so one predicate covers both,
+-- elements included. A bare type() check would pass `{1, 2}` and fail later
+-- inside a lookup, far from the config file that caused it.
+local function is_array_of_strings(value)
+  if type(value) ~= "table" then
+    return false
+  end
+  local count = 0
+  for _ in pairs(value) do
+    count = count + 1
+  end
+  if count ~= #value then
+    return false
+  end
+  for _, item in ipairs(value) do
+    if type(item) ~= "string" then
+      return false
+    end
+  end
+  return true
+end
+
+-- Reject anything the reader would otherwise ignore. Keys are sorted so a file
+-- with more than one problem reports the same one every run; pairs() order is
+-- not stable, and an error message that moves between runs is a bad bug report.
+local function validate(overrides, path)
+  local keys = {}
+  for key in pairs(overrides) do
+    if type(key) ~= "string" then
+      return nil, string.format("config %s must name the keys it overrides, not be a bare list", path)
+    end
+    keys[#keys + 1] = key
+  end
+  table.sort(keys)
+
+  for _, key in ipairs(keys) do
+    local redirect = REDIRECTED_KEYS[key]
+    if redirect then
+      return nil, string.format("config %s sets %q: %s", path, key, redirect)
+    end
+    local expected = RECOGNIZED_KEYS[key]
+    if not expected then
+      return nil, string.format("config %s sets unrecognized key %q", path, key)
+    end
+    if not is_array_of_strings(overrides[key]) then
+      return nil, string.format("config %s: %q must be an %s", path, key, expected)
+    end
+  end
+  return overrides
+end
+
 --- Load a book-level override file: a Lua chunk returning a table.
 --
 -- Lua source rather than JSON keeps this module dependency-free and pure, so
@@ -77,7 +145,7 @@ function M.load_file(path)
   if type(result) ~= "table" then
     return nil, "config " .. path .. " must return a table"
   end
-  return result
+  return validate(result, path)
 end
 
 --- Is `name` one of the configured callout classes?
