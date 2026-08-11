@@ -2136,7 +2136,7 @@ describe("config.load_file", function()
     local path = write_fixture([[require("io") return {}]])
     local overrides, err = config.load_file(path)
     assert.is_nil(overrides)
-    assert.is_string(err)
+    assert.truthy(err:find("require", 1, true))
   end)
 
   -- An override the reader does not recognize is a hard error, not a silent
@@ -2146,7 +2146,7 @@ describe("config.load_file", function()
       local path = write_fixture([[return { callout_class = { "tip" } }]])
       local overrides, err = config.load_file(path)
       assert.is_nil(overrides)
-      assert.truthy(err:find("callout_class", 1, true))
+      assert.truthy(err:find('"callout_class"', 1, true))
     end)
 
     -- strict has its own channel. Reader() applies --lenient before it merges
@@ -2183,7 +2183,7 @@ describe("config.load_file", function()
       local path = write_fixture([[return { "tip", "warning" }]])
       local overrides, err = config.load_file(path)
       assert.is_nil(overrides)
-      assert.is_string(err)
+      assert.truthy(err:find("name the keys", 1, true))
     end)
 
     it("accepts a partial override", function()
@@ -2348,9 +2348,11 @@ end
 -- none of those names resolve. Mode "t" refuses precompiled bytecode, which no
 -- author writes by hand and which would skip the parser entirely.
 --
--- This is not a defense against resource exhaustion -- concatenation and `for`
--- are VM primitives that need no globals -- and it is not meant to be. The
--- file is the author's own; see the plan's Risks section.
+-- This is not a defense against resource exhaustion, and is not meant to be:
+-- concatenation and `for` are VM primitives that need no globals, so a config
+-- file can still allocate without bound. The premise that makes that
+-- acceptable is that the file is the author's own -- it stops holding if
+-- `--config` is ever pointed at content an outside contributor can influence.
 --
 -- Returns nil plus a message on any failure rather than raising, so the caller
 -- decides whether a bad config is fatal. Reader() in src/markua.lua is that

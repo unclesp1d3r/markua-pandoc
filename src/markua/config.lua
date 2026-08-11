@@ -126,9 +126,11 @@ end
 -- none of those names resolve. Mode "t" refuses precompiled bytecode, which no
 -- author writes by hand and which would skip the parser entirely.
 --
--- This is not a defense against resource exhaustion -- concatenation and `for`
--- are VM primitives that need no globals -- and it is not meant to be. The
--- file is the author's own; see the plan's Risks section.
+-- This is not a defense against resource exhaustion, and is not meant to be:
+-- concatenation and `for` are VM primitives that need no globals, so a config
+-- file can still allocate without bound. The premise that makes that
+-- acceptable is that the file is the author's own -- it stops holding if
+-- `--config` is ever pointed at content an outside contributor can influence.
 --
 -- Returns nil plus a message on any failure rather than raising, so the caller
 -- decides whether a bad config is fatal. Reader() in src/markua.lua is that

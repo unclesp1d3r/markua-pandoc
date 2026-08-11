@@ -135,7 +135,7 @@ describe("config.load_file", function()
     local path = write_fixture([[require("io") return {}]])
     local overrides, err = config.load_file(path)
     assert.is_nil(overrides)
-    assert.is_string(err)
+    assert.truthy(err:find("require", 1, true))
   end)
 
   -- An override the reader does not recognize is a hard error, not a silent
@@ -145,7 +145,7 @@ describe("config.load_file", function()
       local path = write_fixture([[return { callout_class = { "tip" } }]])
       local overrides, err = config.load_file(path)
       assert.is_nil(overrides)
-      assert.truthy(err:find("callout_class", 1, true))
+      assert.truthy(err:find('"callout_class"', 1, true))
     end)
 
     -- strict has its own channel. Reader() applies --lenient before it merges
@@ -182,7 +182,7 @@ describe("config.load_file", function()
       local path = write_fixture([[return { "tip", "warning" }]])
       local overrides, err = config.load_file(path)
       assert.is_nil(overrides)
-      assert.is_string(err)
+      assert.truthy(err:find("name the keys", 1, true))
     end)
 
     it("accepts a partial override", function()
