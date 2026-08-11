@@ -6,9 +6,10 @@
 -- A book narrows the documented class list through a `--config` file, which
 -- `load_file` reads as data rather than running as a program.
 --
--- The shape this module defines is already load-bearing: `errors.report` reads
--- `cfg.strict` and `cfg.sink`, blocks.lua asks `is_callout_class`, and
--- inline.lua iterates `index_keys`.
+-- The shape this module defines is already load-bearing: the shipped
+-- `errors.report` reads `cfg.strict` and `cfg.sink`. Later tasks add the rest
+-- of the consumers -- blocks.lua asking `is_callout_class`, inline.lua
+-- iterating `index_keys`, and Reader() calling `load_file` then `merge`.
 local M = {}
 
 --- The reader's built-in configuration. Constructs fresh tables per call, so
