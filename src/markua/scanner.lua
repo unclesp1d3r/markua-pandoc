@@ -7,26 +7,28 @@ local M = {}
 
 local TAB_STOP = 4
 
--- Column width of a line's leading whitespace, expanding tabs to the next
--- 4-column stop (CommonMark's rule, verified against pandoc 3.10.1). Matching
--- only spaces scores a tab as zero, which keeps a tab-indented "\t```" a fence
--- and a tab-indented "\t{timeout: 30}" prose -- both wrong: pandoc parses the
--- first as an indented code block and the second as a CodeBlock. Both the
--- fence-recognition and indented-code checks below route through this same
--- measure so they agree with each other and with pandoc.
-local function indent_columns(line)
+-- Display column of the byte at `stop`, expanding tabs to 4-column stops
+-- (CommonMark's rule, verified against pandoc 3.10.1). Everything that needs a
+-- column measures through here, so the fence check, the indented-code check
+-- and the list-marker gap can never drift apart.
+local function column_at(text, stop)
   local column = 0
-  for i = 1, #line do
-    local ch = line:sub(i, i)
-    if ch == " " then
-      column = column + 1
-    elseif ch == "\t" then
+  for i = 1, stop - 1 do
+    if text:sub(i, i) == "\t" then
       column = column - (column % TAB_STOP) + TAB_STOP
     else
-      break
+      column = column + 1
     end
   end
   return column
+end
+
+-- Column width of a line's leading whitespace. Matching only spaces would
+-- score a tab as zero, which keeps a tab-indented "\t```" a fence and a
+-- tab-indented "\t{timeout: 30}" prose -- both wrong: pandoc parses the first
+-- as an indented code block and the second as a CodeBlock.
+local function indent_columns(line)
+  return column_at(line, #line:match("^[ \t]*") + 1)
 end
 
 -- The two fence markers, as a table rather than chained matches: Lua patterns
@@ -35,12 +37,11 @@ end
 local FENCE_PATTERNS = { "^(```+)(.*)$", "^(~~~+)(.*)$" }
 
 -- Returns marker and info string if the line opens or closes a fence.
--- CommonMark allows a fence to be indented up to three columns; at four it is
--- an indented code block instead, which is handled separately below.
+-- Expects content with the container prefix and indentation already stripped:
+-- the caller owns the 0-3 column rule, because only it knows the enclosing
+-- list or blockquote's content column, and a raw-indentation check here would
+-- get that wrong the moment a container shifted it.
 local function fence_parts(line)
-  if indent_columns(line) > 3 then
-    return nil
-  end
   local body = line:gsub("^ *", "")
   local marker, info
   for _, pattern in ipairs(FENCE_PATTERNS) do
@@ -104,21 +105,6 @@ local function strip_blockquote(line)
   end
 end
 
--- Display column of the byte at `stop`, expanding tabs to the same 4-column
--- stops as indent_columns. A list marker's gap may be a tab, so a byte count
--- is not a column count.
-local function column_at(text, stop)
-  local column = 0
-  for i = 1, stop - 1 do
-    if text:sub(i, i) == "\t" then
-      column = column - (column % TAB_STOP) + TAB_STOP
-    else
-      column = column + 1
-    end
-  end
-  return column
-end
-
 -- Content column of a list item's body, or nil when the line starts no item.
 -- A bullet or ordered marker shifts where that item's content begins, and
 -- CommonMark measures its nested code from there -- so "1. item" followed by
@@ -143,8 +129,8 @@ local function is_thematic_break(rest)
   return squeezed:gsub("%" .. squeezed:sub(1, 1), "") == ""
 end
 
-local function list_content_column(rest)
-  if is_thematic_break(rest) then
+local function list_content_column(rest, thematic)
+  if thematic then
     return nil
   end
   for _, pattern in ipairs(LIST_MARKERS) do
@@ -235,8 +221,13 @@ function M.scan(text)
     local list_column = #list_stack > 0 and list_stack[#list_stack].column or 0
 
     local column = indent_columns(rest)
+    -- Computed once and reused by both the list gate and the paragraph gate
+    -- below; it squeezes the whole line, so doing it twice per prose line is
+    -- the one duplicated scan in this loop.
+    local thematic = not blank and is_thematic_break(rest)
+
     if not blank and not open_marker then
-      local started = list_content_column(rest)
+      local started = list_content_column(rest, thematic)
       if started and #list_stack == 0 and in_paragraph then
         started = nil        -- a marker cannot interrupt an open paragraph
       end
@@ -306,7 +297,7 @@ function M.scan(text)
     end
 
     prev_blank = blank
-    if blank or record.in_code or is_thematic_break(rest) or rest:match("^#") then
+    if blank or record.in_code or thematic or rest:match("^#") then
       in_paragraph = false
     else
       in_paragraph = true

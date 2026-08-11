@@ -1039,26 +1039,28 @@ local M = {}
 
 local TAB_STOP = 4
 
--- Column width of a line's leading whitespace, expanding tabs to the next
--- 4-column stop (CommonMark's rule, verified against pandoc 3.10.1). Matching
--- only spaces scores a tab as zero, which keeps a tab-indented "\t```" a fence
--- and a tab-indented "\t{timeout: 30}" prose -- both wrong: pandoc parses the
--- first as an indented code block and the second as a CodeBlock. Both the
--- fence-recognition and indented-code checks below route through this same
--- measure so they agree with each other and with pandoc.
-local function indent_columns(line)
+-- Display column of the byte at `stop`, expanding tabs to 4-column stops
+-- (CommonMark's rule, verified against pandoc 3.10.1). Everything that needs a
+-- column measures through here, so the fence check, the indented-code check
+-- and the list-marker gap can never drift apart.
+local function column_at(text, stop)
   local column = 0
-  for i = 1, #line do
-    local ch = line:sub(i, i)
-    if ch == " " then
-      column = column + 1
-    elseif ch == "\t" then
+  for i = 1, stop - 1 do
+    if text:sub(i, i) == "\t" then
       column = column - (column % TAB_STOP) + TAB_STOP
     else
-      break
+      column = column + 1
     end
   end
   return column
+end
+
+-- Column width of a line's leading whitespace. Matching only spaces would
+-- score a tab as zero, which keeps a tab-indented "\t```" a fence and a
+-- tab-indented "\t{timeout: 30}" prose -- both wrong: pandoc parses the first
+-- as an indented code block and the second as a CodeBlock.
+local function indent_columns(line)
+  return column_at(line, #line:match("^[ \t]*") + 1)
 end
 
 -- The two fence markers, as a table rather than chained matches: Lua patterns
@@ -1067,12 +1069,11 @@ end
 local FENCE_PATTERNS = { "^(```+)(.*)$", "^(~~~+)(.*)$" }
 
 -- Returns marker and info string if the line opens or closes a fence.
--- CommonMark allows a fence to be indented up to three columns; at four it is
--- an indented code block instead, which is handled separately below.
+-- Expects content with the container prefix and indentation already stripped:
+-- the caller owns the 0-3 column rule, because only it knows the enclosing
+-- list or blockquote's content column, and a raw-indentation check here would
+-- get that wrong the moment a container shifted it.
 local function fence_parts(line)
-  if indent_columns(line) > 3 then
-    return nil
-  end
   local body = line:gsub("^ *", "")
   local marker, info
   for _, pattern in ipairs(FENCE_PATTERNS) do
@@ -1136,21 +1137,6 @@ local function strip_blockquote(line)
   end
 end
 
--- Display column of the byte at `stop`, expanding tabs to the same 4-column
--- stops as indent_columns. A list marker's gap may be a tab, so a byte count
--- is not a column count.
-local function column_at(text, stop)
-  local column = 0
-  for i = 1, stop - 1 do
-    if text:sub(i, i) == "\t" then
-      column = column - (column % TAB_STOP) + TAB_STOP
-    else
-      column = column + 1
-    end
-  end
-  return column
-end
-
 -- Content column of a list item's body, or nil when the line starts no item.
 -- A bullet or ordered marker shifts where that item's content begins, and
 -- CommonMark measures its nested code from there -- so "1. item" followed by
@@ -1175,8 +1161,8 @@ local function is_thematic_break(rest)
   return squeezed:gsub("%" .. squeezed:sub(1, 1), "") == ""
 end
 
-local function list_content_column(rest)
-  if is_thematic_break(rest) then
+local function list_content_column(rest, thematic)
+  if thematic then
     return nil
   end
   for _, pattern in ipairs(LIST_MARKERS) do
@@ -1267,8 +1253,13 @@ function M.scan(text)
     local list_column = #list_stack > 0 and list_stack[#list_stack].column or 0
 
     local column = indent_columns(rest)
+    -- Computed once and reused by both the list gate and the paragraph gate
+    -- below; it squeezes the whole line, so doing it twice per prose line is
+    -- the one duplicated scan in this loop.
+    local thematic = not blank and is_thematic_break(rest)
+
     if not blank and not open_marker then
-      local started = list_content_column(rest)
+      local started = list_content_column(rest, thematic)
       if started and #list_stack == 0 and in_paragraph then
         started = nil        -- a marker cannot interrupt an open paragraph
       end
@@ -1338,7 +1329,7 @@ function M.scan(text)
     end
 
     prev_blank = blank
-    if blank or record.in_code or is_thematic_break(rest) or rest:match("^#") then
+    if blank or record.in_code or thematic or rest:match("^#") then
       in_paragraph = false
     else
       in_paragraph = true
@@ -1406,6 +1397,19 @@ Create `test/attributes_spec.lua`:
 -- corrections this plan makes to that reference module.
 local attributes = require("src.markua.attributes")
 
+-- Builds the parsed-attribute shape directly, without going through parse --
+-- these cases exercise to_pandoc_attr on values parse would never produce, or
+-- would decorate with its own file/line provenance.
+local function attr(fields)
+  fields = fields or {}
+  return {
+    id = fields.id,
+    classes = fields.classes or {},
+    keyvals = fields.keyvals or {},
+    bare = fields.bare or {},
+  }
+end
+
 describe("attributes.parse", function()
   it("parses key/value pairs", function()
     local a = attributes.parse('{title: "Hello, world", line-numbers: true}', "f.md", 1)
@@ -1457,31 +1461,31 @@ describe("attributes.to_pandoc_attr", function()
     -- construct and renders the ::: delimiters as literal text. Verified
     -- against pandoc 3.10.1 under that exact format: the single-quoted form
     -- parses back to the value `He said "hi"`.
-    local a = { id = nil, classes = {}, keyvals = { title = 'He said "hi"' }, bare = {} }
+    local a = attr({ keyvals = { title = 'He said "hi"' } })
     assert.equals([[{title='He said "hi"'}]], attributes.to_pandoc_attr(a))
   end)
 
   it("keeps double quotes for a value containing only an apostrophe", function()
-    local a = { id = nil, classes = {}, keyvals = { title = "it's" }, bare = {} }
+    local a = attr({ keyvals = { title = "it's" } })
     assert.equals([[{title="it's"}]], attributes.to_pandoc_attr(a))
   end)
 
   it("raises for a value carrying both quote characters", function()
     -- Neither quoting style can enclose it and no escape is available, so
     -- this is unrepresentable rather than silently corrupted.
-    local a = { id = nil, classes = {}, keyvals = { title = [[He said "hi" and it's]] }, bare = {} }
+    local a = attr({ keyvals = { title = [[He said "hi" and it's]] } })
     assert.is_false(pcall(attributes.to_pandoc_attr, a, "f.md", 3))
   end)
 
   it("escapes a backslash in a value (KTD4)", function()
     -- pandoc spells a literal backslash as title="a\\b"; escape \ before "
     -- so the quote pass does not double-escape the backslashes it introduces.
-    local a = { id = nil, classes = {}, keyvals = { path = "a\\b" }, bare = {} }
+    local a = attr({ keyvals = { path = "a\\b" } })
     assert.equals('{path="a\\\\b"}', attributes.to_pandoc_attr(a))
   end)
 
   it("orders emitted keyvals deterministically across repeated calls (R18)", function()
-    local a = { id = nil, classes = {}, keyvals = { zeta = "1", alpha = "2" }, bare = {} }
+    local a = attr({ keyvals = { zeta = "1", alpha = "2" } })
     local first = attributes.to_pandoc_attr(a)
     local second = attributes.to_pandoc_attr(a)
     assert.equals(first, second)
@@ -1578,27 +1582,27 @@ describe("attributes.to_pandoc_attr name representability", function()
   --   identifier     = letter >> many (alphaNum <|> oneOf "-_:.")   -- class
   -- An id may therefore start with a digit or a dash; a class may not.
   it("rejects a class beginning with a digit, which pandoc will not parse", function()
-    local a = { id = nil, classes = { "3things" }, keyvals = {}, bare = {} }
+    local a = attr({ classes = { "3things" } })
     assert.is_false(pcall(attributes.to_pandoc_attr, a, "f.md", 1))
   end)
 
   it("rejects a name carrying punctuation outside pandoc's set", function()
     for _, name in ipairs({ "a&b", "a%b", "a#b", "a<b>c" }) do
-      local a = { id = name, classes = {}, keyvals = {}, bare = {} }
+      local a = attr({ id = name })
       assert.is_false(pcall(attributes.to_pandoc_attr, a, "f.md", 1),
         "expected " .. name .. " to be rejected as an id")
     end
   end)
 
   it("accepts colon, dot and a leading dash in an id", function()
-    local a = { id = "a:b.c", classes = {}, keyvals = {}, bare = {} }
+    local a = attr({ id = "a:b.c" })
     assert.equals("{#a:b.c}", attributes.to_pandoc_attr(a))
-    local dashed = { id = "--x", classes = {}, keyvals = {}, bare = {} }
+    local dashed = attr({ id = "--x" })
     assert.equals("{#--x}", attributes.to_pandoc_attr(dashed))
   end)
 
   it("accepts a non-ASCII name, which pandoc's Unicode alphaNum allows", function()
-    local a = { id = "caf\195\169", classes = { "na\195\175ve" }, keyvals = {}, bare = {} }
+    local a = attr({ id = "caf\195\169", classes = { "na\195\175ve" } })
     assert.equals("{#caf\195\169 .na\195\175ve}", attributes.to_pandoc_attr(a))
   end)
 

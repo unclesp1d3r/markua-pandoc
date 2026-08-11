@@ -10,6 +10,19 @@
 -- corrections this plan makes to that reference module.
 local attributes = require("src.markua.attributes")
 
+-- Builds the parsed-attribute shape directly, without going through parse --
+-- these cases exercise to_pandoc_attr on values parse would never produce, or
+-- would decorate with its own file/line provenance.
+local function attr(fields)
+  fields = fields or {}
+  return {
+    id = fields.id,
+    classes = fields.classes or {},
+    keyvals = fields.keyvals or {},
+    bare = fields.bare or {},
+  }
+end
+
 describe("attributes.parse", function()
   it("parses key/value pairs", function()
     local a = attributes.parse('{title: "Hello, world", line-numbers: true}', "f.md", 1)
@@ -61,31 +74,31 @@ describe("attributes.to_pandoc_attr", function()
     -- construct and renders the ::: delimiters as literal text. Verified
     -- against pandoc 3.10.1 under that exact format: the single-quoted form
     -- parses back to the value `He said "hi"`.
-    local a = { id = nil, classes = {}, keyvals = { title = 'He said "hi"' }, bare = {} }
+    local a = attr({ keyvals = { title = 'He said "hi"' } })
     assert.equals([[{title='He said "hi"'}]], attributes.to_pandoc_attr(a))
   end)
 
   it("keeps double quotes for a value containing only an apostrophe", function()
-    local a = { id = nil, classes = {}, keyvals = { title = "it's" }, bare = {} }
+    local a = attr({ keyvals = { title = "it's" } })
     assert.equals([[{title="it's"}]], attributes.to_pandoc_attr(a))
   end)
 
   it("raises for a value carrying both quote characters", function()
     -- Neither quoting style can enclose it and no escape is available, so
     -- this is unrepresentable rather than silently corrupted.
-    local a = { id = nil, classes = {}, keyvals = { title = [[He said "hi" and it's]] }, bare = {} }
+    local a = attr({ keyvals = { title = [[He said "hi" and it's]] } })
     assert.is_false(pcall(attributes.to_pandoc_attr, a, "f.md", 3))
   end)
 
   it("escapes a backslash in a value (KTD4)", function()
     -- pandoc spells a literal backslash as title="a\\b"; escape \ before "
     -- so the quote pass does not double-escape the backslashes it introduces.
-    local a = { id = nil, classes = {}, keyvals = { path = "a\\b" }, bare = {} }
+    local a = attr({ keyvals = { path = "a\\b" } })
     assert.equals('{path="a\\\\b"}', attributes.to_pandoc_attr(a))
   end)
 
   it("orders emitted keyvals deterministically across repeated calls (R18)", function()
-    local a = { id = nil, classes = {}, keyvals = { zeta = "1", alpha = "2" }, bare = {} }
+    local a = attr({ keyvals = { zeta = "1", alpha = "2" } })
     local first = attributes.to_pandoc_attr(a)
     local second = attributes.to_pandoc_attr(a)
     assert.equals(first, second)
@@ -182,27 +195,27 @@ describe("attributes.to_pandoc_attr name representability", function()
   --   identifier     = letter >> many (alphaNum <|> oneOf "-_:.")   -- class
   -- An id may therefore start with a digit or a dash; a class may not.
   it("rejects a class beginning with a digit, which pandoc will not parse", function()
-    local a = { id = nil, classes = { "3things" }, keyvals = {}, bare = {} }
+    local a = attr({ classes = { "3things" } })
     assert.is_false(pcall(attributes.to_pandoc_attr, a, "f.md", 1))
   end)
 
   it("rejects a name carrying punctuation outside pandoc's set", function()
     for _, name in ipairs({ "a&b", "a%b", "a#b", "a<b>c" }) do
-      local a = { id = name, classes = {}, keyvals = {}, bare = {} }
+      local a = attr({ id = name })
       assert.is_false(pcall(attributes.to_pandoc_attr, a, "f.md", 1),
         "expected " .. name .. " to be rejected as an id")
     end
   end)
 
   it("accepts colon, dot and a leading dash in an id", function()
-    local a = { id = "a:b.c", classes = {}, keyvals = {}, bare = {} }
+    local a = attr({ id = "a:b.c" })
     assert.equals("{#a:b.c}", attributes.to_pandoc_attr(a))
-    local dashed = { id = "--x", classes = {}, keyvals = {}, bare = {} }
+    local dashed = attr({ id = "--x" })
     assert.equals("{#--x}", attributes.to_pandoc_attr(dashed))
   end)
 
   it("accepts a non-ASCII name, which pandoc's Unicode alphaNum allows", function()
-    local a = { id = "caf\195\169", classes = { "na\195\175ve" }, keyvals = {}, bare = {} }
+    local a = attr({ id = "caf\195\169", classes = { "na\195\175ve" } })
     assert.equals("{#caf\195\169 .na\195\175ve}", attributes.to_pandoc_attr(a))
   end)
 
