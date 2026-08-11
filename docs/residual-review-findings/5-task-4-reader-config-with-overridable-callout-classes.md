@@ -60,6 +60,17 @@ items of their own. This file is the durable record.
   a CLI flag will not find it by searching `docs/solutions/`.
   *Source: learnings researcher, advisory. The higher-value lesson from this branch — that `#` and `ipairs` cannot validate a Lua array — was captured instead, at `docs/solutions/design-patterns/lua-array-validation-cannot-trust-length.md`.*
 
+- **Nothing enforces R15's byte-identity, and it broke once during this branch.**
+  `docs/plan.md` Task 4 embeds both shipped files verbatim, but no CI job, `just`
+  recipe, or pre-commit hook verifies it. On this branch a late one-line comment
+  fix to `src/markua/config.lua` landed without the matching re-sync and had to be
+  repaired in a follow-up commit — one break in eight commits, caught only because
+  the check was run by hand. A ~20-line extraction script wired into `just test`
+  would turn R15 into a real gate. Not built here: it changes `just`/CI, a shared
+  surface outside Task 4's scope, and belongs with the Task 9 golden-file harness
+  that `docs/plan.md` already plans.
+  *Source: this branch's own history.*
+
 ## Refuted during review
 
 - The adversarial reviewer claimed to have "proved structurally" that no table
