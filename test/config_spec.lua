@@ -62,3 +62,88 @@ describe("config.merge", function()
     assert.is_true(cfg.strict)
   end)
 end)
+
+-- Fixture config files are written at run time rather than committed. The
+-- sandbox scenarios need hostile content that has no business sitting in the
+-- repo, and a spec that builds its own inputs cannot drift from them.
+local fixtures = {}
+
+local function write_fixture(contents, mode)
+  local path = os.tmpname()
+  local handle = assert(io.open(path, mode or "w"))
+  handle:write(contents)
+  handle:close()
+  fixtures[#fixtures + 1] = path
+  return path
+end
+
+-- A path guaranteed not to exist: os.tmpname creates the file on POSIX, so
+-- removing it yields a name nothing else will claim.
+local function missing_path()
+  local path = os.tmpname()
+  os.remove(path)
+  return path
+end
+
+describe("config.load_file", function()
+  -- Unconditional cleanup: an assertion that fails mid-scenario skips any
+  -- inline os.remove, which would leak fixtures into /tmp across CI runs.
+  after_each(function()
+    for _, path in ipairs(fixtures) do
+      os.remove(path)
+    end
+    fixtures = {}
+  end)
+
+  it("loads a table from a config file", function()
+    local path = write_fixture([[return { callout_classes = { "tip" } }]])
+    local overrides = config.load_file(path)
+    assert.same({ "tip" }, overrides.callout_classes)
+  end)
+
+  it("reports a missing file by path instead of raising", function()
+    local path = missing_path()
+    local overrides, err = config.load_file(path)
+    assert.is_nil(overrides)
+    assert.truthy(err:find(path, 1, true))
+  end)
+
+  it("reports a syntax error by path instead of raising", function()
+    local path = write_fixture([[return { callout_classes = ]])
+    local overrides, err = config.load_file(path)
+    assert.is_nil(overrides)
+    assert.truthy(err:find(path, 1, true))
+  end)
+
+  it("rejects a chunk that returns something other than a table", function()
+    local path = write_fixture([[return 42]])
+    local overrides, err = config.load_file(path)
+    assert.is_nil(overrides)
+    assert.truthy(err:find("table", 1, true))
+  end)
+
+  -- The empty environment is the sandbox: a config file is evaluated for its
+  -- return value, not run as a program with library access.
+  it("denies a config file the os library", function()
+    local path = write_fixture([[os.execute("touch /tmp/markua-pwned") return {}]])
+    local overrides, err = config.load_file(path)
+    assert.is_nil(overrides)
+    assert.truthy(err:find("os", 1, true))
+  end)
+
+  it("denies a config file require", function()
+    local path = write_fixture([[require("io") return {}]])
+    local overrides, err = config.load_file(path)
+    assert.is_nil(overrides)
+    assert.is_string(err)
+  end)
+
+  -- Text mode only. Precompiled bytecode skips the parser entirely and is not
+  -- something an author writes by hand, so refusing it costs nothing.
+  it("refuses precompiled bytecode", function()
+    local path = write_fixture(string.dump(load([[return { callout_classes = { "tip" } }]])), "wb")
+    local overrides, err = config.load_file(path)
+    assert.is_nil(overrides)
+    assert.is_string(err)
+  end)
+end)

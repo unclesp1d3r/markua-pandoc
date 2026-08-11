@@ -3,6 +3,9 @@
 -- Pure data plus the lookups the rest of the pipeline needs. No pandoc global
 -- here, per AGENTS.md -- busted runs under system Lua, where it does not exist.
 --
+-- A book narrows the documented class list through a `--config` file, which
+-- `load_file` reads as data rather than running as a program.
+--
 -- The shape this module defines is already load-bearing: `errors.report` reads
 -- `cfg.strict` and `cfg.sink`, blocks.lua asks `is_callout_class`, and
 -- inline.lua iterates `index_keys`.
@@ -43,6 +46,38 @@ function M.merge(base, overrides)
     out[k] = v
   end
   return out
+end
+
+--- Load a book-level override file: a Lua chunk returning a table.
+--
+-- Lua source rather than JSON keeps this module dependency-free and pure, so
+-- busted can exercise it under system Lua with no pandoc and no JSON library.
+--
+-- The chunk is loaded with an empty environment, so a config file is data: it
+-- cannot reach the filesystem, spawn a process, or `require` anything, because
+-- none of those names resolve. Mode "t" refuses precompiled bytecode, which no
+-- author writes by hand and which would skip the parser entirely.
+--
+-- This is not a defense against resource exhaustion -- concatenation and `for`
+-- are VM primitives that need no globals -- and it is not meant to be. The
+-- file is the author's own; see the plan's Risks section.
+--
+-- Returns nil plus a message on any failure rather than raising, so the caller
+-- decides whether a bad config is fatal. Reader() in src/markua.lua is that
+-- caller and turns it into an error.
+function M.load_file(path)
+  local chunk, err = loadfile(path, "t", {})
+  if not chunk then
+    return nil, "cannot load config " .. path .. ": " .. tostring(err)
+  end
+  local ok, result = pcall(chunk)
+  if not ok then
+    return nil, "error in config " .. path .. ": " .. tostring(result)
+  end
+  if type(result) ~= "table" then
+    return nil, "config " .. path .. " must return a table"
+  end
+  return result
 end
 
 --- Is `name` one of the configured callout classes?
