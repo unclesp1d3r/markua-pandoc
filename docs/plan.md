@@ -2019,6 +2019,13 @@ describe("config.defaults", function()
     assert.is_false(config.is_callout_class(cfg, "nonsense"))
   end)
 
+  -- Exact match, not substring: "notebook" must not inherit "note".
+  it("matches a callout class exactly rather than by prefix", function()
+    local cfg = config.defaults()
+    assert.is_true(config.is_callout_class(cfg, "note"))
+    assert.is_false(config.is_callout_class(cfg, "notebook"))
+  end)
+
   it("accepts both index keys, spec form first", function()
     assert.same({ "ix", "i" }, config.defaults().index_keys)
   end)
@@ -2054,6 +2061,26 @@ describe("config.merge", function()
     local base = config.defaults()
     config.merge(base, { strict = false })
     assert.is_true(base.strict)
+  end)
+
+  -- assert.same is deep equality, so it passes even when the two configs are
+  -- the SAME table. Identity is what matters here: a consumer appending to one
+  -- config's array must not write through into the base every other config is
+  -- derived from.
+  it("returns arrays that are not the base's arrays", function()
+    local base = config.defaults()
+    local cfg = config.merge(base, { index_keys = { "ix" } })
+    assert.is_false(cfg.callout_classes == base.callout_classes)
+    table.insert(cfg.callout_classes, "leaked")
+    assert.is_false(config.is_callout_class(base, "leaked"))
+  end)
+
+  it("keeps sibling configs derived from one base independent", function()
+    local base = config.defaults()
+    local first = config.merge(base, { index_keys = { "ix" } })
+    local second = config.merge(base, { index_keys = { "i" } })
+    table.insert(first.callout_classes, "leaked")
+    assert.is_false(config.is_callout_class(second, "leaked"))
   end)
 
   it("copies the base when there is nothing to override", function()
@@ -2186,6 +2213,51 @@ describe("config.load_file", function()
       assert.truthy(err:find("name the keys", 1, true))
     end)
 
+    -- A table with a hole plus a stray key can make the pairs count equal `#`,
+    -- at which point ipairs stops at the hole and an element check that trusts
+    -- it never runs. Accepting this silently disabled every callout class.
+    it("rejects an array with a hole in it", function()
+      local path = write_fixture([[
+        local t = {}
+        for i = 1, 6 do t[i] = "c" .. i end
+        t[1] = nil
+        t.junk = "x"
+        return { callout_classes = t }
+      ]])
+      local overrides, err = config.load_file(path)
+      assert.is_nil(overrides)
+      assert.truthy(err:find("array of strings", 1, true))
+    end)
+
+    it("rejects a map-shaped value on a recognized key", function()
+      local path = write_fixture([[return { callout_classes = { warning = true } }]])
+      local overrides, err = config.load_file(path)
+      assert.is_nil(overrides)
+      assert.truthy(err:find("array of strings", 1, true))
+    end)
+
+    -- Several problems in one file must always report the alphabetically first,
+    -- so the message does not move between runs. Lua seeds its string hash per
+    -- state, so pairs() order can differ across processes; a spread of keys
+    -- makes an unsorted implementation likely -- not certain -- to name a
+    -- different one. This narrows the gap rather than closing it: within a
+    -- single process pairs() is stable, so no in-process test can fully pin
+    -- the sort.
+    it("names the alphabetically first problem when a file has several", function()
+      local path = write_fixture([[
+        return { hhh = {}, ggg = {}, fff = {}, eee = {},
+                 ddd = {}, ccc = {}, bbb = {}, aaa = {} }
+      ]])
+      local overrides, err = config.load_file(path)
+      assert.is_nil(overrides)
+      assert.truthy(err:find('"aaa"', 1, true))
+    end)
+
+    it("accepts a config that overrides nothing", function()
+      local path = write_fixture([[return {}]])
+      assert.same({}, config.load_file(path))
+    end)
+
     it("accepts a partial override", function()
       local path = write_fixture([[return { callout_classes = { "tip" } }]])
       assert.same({ "tip" }, config.load_file(path).callout_classes)
@@ -2267,6 +2339,22 @@ function M.merge(base, overrides)
   for k, v in pairs(overrides or {}) do
     out[k] = v
   end
+  -- Copy the table-valued fields so the result shares no table identity with
+  -- its inputs. Without this, an un-overridden `callout_classes` is literally
+  -- the base's table, and a consumer appending to one merged config writes
+  -- through into the base and into every sibling merged from it -- the leak
+  -- `defaults()` builds fresh tables to prevent, reintroduced one level down.
+  -- This copies one level and stays a replace, not a deep merge: nested
+  -- content is never combined, only detached.
+  for k, v in pairs(out) do
+    if type(v) == "table" then
+      local copy = {}
+      for item_key, item in pairs(v) do
+        copy[item_key] = item
+      end
+      out[k] = copy
+    end
+  end
   return out
 end
 
@@ -2290,6 +2378,14 @@ local REDIRECTED_KEYS = {
 -- Both recognized keys carry the same shape, so one predicate covers both,
 -- elements included. A bare type() check would pass `{1, 2}` and fail later
 -- inside a lookup, far from the config file that caused it.
+--
+-- Counting keys and then indexing 1..count is deliberate. Neither `#` nor
+-- `ipairs` can carry this check: `#` is only defined at a border, so a table
+-- with a hole plus a stray key can make `#value` equal the key count, and
+-- `ipairs` then stops at the hole and validates nothing. That combination
+-- accepted a config whose callout_classes had a gap, and every callout class
+-- in the book silently stopped resolving. Indexing every slot from 1 to the
+-- key count catches holes, extra hash keys, and non-string elements alike.
 local function is_array_of_strings(value)
   if type(value) ~= "table" then
     return false
@@ -2298,11 +2394,8 @@ local function is_array_of_strings(value)
   for _ in pairs(value) do
     count = count + 1
   end
-  if count ~= #value then
-    return false
-  end
-  for _, item in ipairs(value) do
-    if type(item) ~= "string" then
+  for i = 1, count do
+    if type(value[i]) ~= "string" then
       return false
     end
   end
@@ -2403,7 +2496,7 @@ return {
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/config_spec.lua`
-Expected: PASS, 22 successes
+Expected: PASS, 29 successes
 
 - [ ] **Step 5: Commit**
 

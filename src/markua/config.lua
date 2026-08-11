@@ -45,6 +45,22 @@ function M.merge(base, overrides)
   for k, v in pairs(overrides or {}) do
     out[k] = v
   end
+  -- Copy the table-valued fields so the result shares no table identity with
+  -- its inputs. Without this, an un-overridden `callout_classes` is literally
+  -- the base's table, and a consumer appending to one merged config writes
+  -- through into the base and into every sibling merged from it -- the leak
+  -- `defaults()` builds fresh tables to prevent, reintroduced one level down.
+  -- This copies one level and stays a replace, not a deep merge: nested
+  -- content is never combined, only detached.
+  for k, v in pairs(out) do
+    if type(v) == "table" then
+      local copy = {}
+      for item_key, item in pairs(v) do
+        copy[item_key] = item
+      end
+      out[k] = copy
+    end
+  end
   return out
 end
 
@@ -68,6 +84,14 @@ local REDIRECTED_KEYS = {
 -- Both recognized keys carry the same shape, so one predicate covers both,
 -- elements included. A bare type() check would pass `{1, 2}` and fail later
 -- inside a lookup, far from the config file that caused it.
+--
+-- Counting keys and then indexing 1..count is deliberate. Neither `#` nor
+-- `ipairs` can carry this check: `#` is only defined at a border, so a table
+-- with a hole plus a stray key can make `#value` equal the key count, and
+-- `ipairs` then stops at the hole and validates nothing. That combination
+-- accepted a config whose callout_classes had a gap, and every callout class
+-- in the book silently stopped resolving. Indexing every slot from 1 to the
+-- key count catches holes, extra hash keys, and non-string elements alike.
 local function is_array_of_strings(value)
   if type(value) ~= "table" then
     return false
@@ -76,11 +100,8 @@ local function is_array_of_strings(value)
   for _ in pairs(value) do
     count = count + 1
   end
-  if count ~= #value then
-    return false
-  end
-  for _, item in ipairs(value) do
-    if type(item) ~= "string" then
+  for i = 1, count do
+    if type(value[i]) ~= "string" then
       return false
     end
   end
