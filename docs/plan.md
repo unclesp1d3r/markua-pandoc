@@ -3593,6 +3593,121 @@ git commit -m "feat: pandoc custom reader entry point with golden tests"
 
 ---
 
+### Task 9a: Code and table resource lowering
+
+**Files:**
+
+- Create: `src/filters/resources.lua`
+
+**Interfaces:**
+
+- Consumes: `.code-resource` and `.table-resource` spans from `resources.transform`.
+- Produces: a real `CodeBlock` and a real `Table` respectively, so the content reaches every writer instead of rendering as nothing.
+
+Without this filter a manuscript's code samples convert to a book with no code
+in it, and the conversion exits 0. Video and audio stay out of scope (see the
+out-of-scope list): neither has a print target and pandoc has no native node
+for either, so their spans remain annotations for a downstream filter.
+
+- [ ] **Step 1: Write the filter**
+
+Create `src/filters/resources.lua`:
+
+```lua
+--- Lower non-image resource spans into real pandoc blocks.
+--
+-- resources.transform annotates these but cannot read files: it is pure Lua
+-- and runs before pandoc exists. Reading happens here, where PANDOC_STATE
+-- makes the resource path available.
+local function read_file(src)
+  for _, dir in ipairs(PANDOC_STATE.resource_path or { "." }) do
+    local path = (dir == "." and src) or (dir .. "/" .. src)
+    local fh = io.open(path, "r")
+    if fh then
+      local body = fh:read("a")
+      fh:close()
+      return body
+    end
+  end
+  return nil
+end
+
+--- Apply Markua crop-start-line / crop-end-line to an already-read body.
+local function crop(body, attrs)
+  local first = tonumber(attrs["crop-start-line"])
+  local last = tonumber(attrs["crop-end-line"])
+  if not first and not last then
+    return body
+  end
+  local kept, n = {}, 0
+  for line in (body .. "\n"):gmatch("(.-)\n") do
+    n = n + 1
+    if (not first or n >= first) and (not last or n <= last) then
+      kept[#kept + 1] = line
+    end
+  end
+  return table.concat(kept, "\n")
+end
+
+function Para(el)
+  -- A resource span is the whole paragraph; pandoc has already wrapped it.
+  if #el.content ~= 1 or el.content[1].t ~= "Span" then
+    return nil
+  end
+  local span = el.content[1]
+  local src = span.attributes["src"]
+  if not src then
+    return nil
+  end
+
+  if span.classes:includes("code-resource") then
+    local body = read_file(src)
+    if not body then
+      error("cannot read code resource: " .. src, 0)
+    end
+    local lang = span.attributes["format"] or src:match("%.([%w]+)$") or ""
+    return pandoc.CodeBlock(crop(body, span.attributes),
+                            pandoc.Attr(span.identifier, { lang }, {}))
+  end
+
+  if span.classes:includes("table-resource") then
+    local body = read_file(src)
+    if not body then
+      error("cannot read table resource: " .. src, 0)
+    end
+    -- Delegate CSV parsing to pandoc rather than hand-rolling quote handling.
+    local parsed = pandoc.read(body, "csv")
+    return parsed.blocks
+  end
+end
+```
+
+- [ ] **Step 2: Test it**
+
+Add to `test/filters.sh`. A code resource must reach the output as real code,
+not as nothing:
+
+```bash
+printf 'puts "hi"\n' > "$tmp/hello.rb"
+printf '![](hello.rb)\n' > "$tmp/code.md"
+out=$(pandoc --from=src/markua.lua --to=html \
+      --lua-filter=src/filters/resources.lua \
+      --resource-path="$tmp" "$tmp/code.md")
+case "$out" in
+    *'puts'*) echo "ok   code resource lowered to a real code block" ;;
+    *) echo "FAIL: code resource produced no content"; exit 1 ;;
+esac
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/filters/resources.lua test/filters.sh
+git commit -m "feat: lower code and table resources into real blocks"
+```
+
+---
+
 ### Task 10: Index-to-Word-XE filter
 
 **Files:**
@@ -3876,121 +3991,6 @@ echo "ok   index spans round-trip through docx"
 ```bash
 git add src/filters/index-latex.lua src/filters/index-docbook.lua test/filters.sh
 git commit -m "feat: lower index spans for latex and docbook"
-```
-
----
-
-### Task 11a: Code and table resource lowering
-
-**Files:**
-
-- Create: `src/filters/resources.lua`
-
-**Interfaces:**
-
-- Consumes: `.code-resource` and `.table-resource` spans from `resources.transform`.
-- Produces: a real `CodeBlock` and a real `Table` respectively, so the content reaches every writer instead of rendering as nothing.
-
-Without this filter a manuscript's code samples convert to a book with no code
-in it, and the conversion exits 0. Video and audio stay out of scope (see the
-out-of-scope list): neither has a print target and pandoc has no native node
-for either, so their spans remain annotations for a downstream filter.
-
-- [ ] **Step 1: Write the filter**
-
-Create `src/filters/resources.lua`:
-
-```lua
---- Lower non-image resource spans into real pandoc blocks.
---
--- resources.transform annotates these but cannot read files: it is pure Lua
--- and runs before pandoc exists. Reading happens here, where PANDOC_STATE
--- makes the resource path available.
-local function read_file(src)
-  for _, dir in ipairs(PANDOC_STATE.resource_path or { "." }) do
-    local path = (dir == "." and src) or (dir .. "/" .. src)
-    local fh = io.open(path, "r")
-    if fh then
-      local body = fh:read("a")
-      fh:close()
-      return body
-    end
-  end
-  return nil
-end
-
---- Apply Markua crop-start-line / crop-end-line to an already-read body.
-local function crop(body, attrs)
-  local first = tonumber(attrs["crop-start-line"])
-  local last = tonumber(attrs["crop-end-line"])
-  if not first and not last then
-    return body
-  end
-  local kept, n = {}, 0
-  for line in (body .. "\n"):gmatch("(.-)\n") do
-    n = n + 1
-    if (not first or n >= first) and (not last or n <= last) then
-      kept[#kept + 1] = line
-    end
-  end
-  return table.concat(kept, "\n")
-end
-
-function Para(el)
-  -- A resource span is the whole paragraph; pandoc has already wrapped it.
-  if #el.content ~= 1 or el.content[1].t ~= "Span" then
-    return nil
-  end
-  local span = el.content[1]
-  local src = span.attributes["src"]
-  if not src then
-    return nil
-  end
-
-  if span.classes:includes("code-resource") then
-    local body = read_file(src)
-    if not body then
-      error("cannot read code resource: " .. src, 0)
-    end
-    local lang = span.attributes["format"] or src:match("%.([%w]+)$") or ""
-    return pandoc.CodeBlock(crop(body, span.attributes),
-                            pandoc.Attr(span.identifier, { lang }, {}))
-  end
-
-  if span.classes:includes("table-resource") then
-    local body = read_file(src)
-    if not body then
-      error("cannot read table resource: " .. src, 0)
-    end
-    -- Delegate CSV parsing to pandoc rather than hand-rolling quote handling.
-    local parsed = pandoc.read(body, "csv")
-    return parsed.blocks
-  end
-end
-```
-
-- [ ] **Step 2: Test it**
-
-Add to `test/filters.sh`. A code resource must reach the output as real code,
-not as nothing:
-
-```bash
-printf 'puts "hi"\n' > "$tmp/hello.rb"
-printf '![](hello.rb)\n' > "$tmp/code.md"
-out=$(pandoc --from=src/markua.lua --to=html \
-      --lua-filter=src/filters/resources.lua \
-      --resource-path="$tmp" "$tmp/code.md")
-case "$out" in
-    *'puts'*) echo "ok   code resource lowered to a real code block" ;;
-    *) echo "FAIL: code resource produced no content"; exit 1 ;;
-esac
-```
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/filters/resources.lua test/filters.sh
-git commit -m "feat: lower code and table resources into real blocks"
 ```
 
 ---
@@ -4339,7 +4339,7 @@ Recorded so they are decisions rather than oversights:
 - **Quizzes and exercises** (Markua 0.10 course constructs). Rejected with a clear error by Task 8.
 - **Smart crosslinks** (`[](#id)` auto-generating link text from the target heading). Requires a second pass over the whole document to resolve titles; the reader is per-file. Add as a filter later.
 - **`Book.txt` multi-file assembly.** The reader converts one file at a time; ordering is the caller's job. A `--book` mode in `bin/markua` is the natural follow-up.
-- **Video and audio resource lowering.** `resources.lua` still classifies them and emits an annotated span, but no filter lowers that span into a writer construct. Neither has a print target, and pandoc has no native node for either. Code and CSV-table resources *are* lowered (Task 11a).
+- **Video and audio resource lowering.** `resources.lua` still classifies them and emits an annotated span, but no filter lowers that span into a writer construct. Neither has a print target, and pandoc has no native node for either. Code and CSV-table resources *are* lowered (Task 9a).
 - **Emoji shortcodes and Font Awesome** (`:joy:`, `:fa-github:`). Pandoc's `emoji` extension covers the first; Font Awesome has no sensible print target.
 - **Leanpub document settings** (`bookfilename`, `soft-breaks`). Parsed and ignored; they configure Leanpub's build, not pandoc's.
 
