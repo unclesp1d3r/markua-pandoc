@@ -3084,13 +3084,15 @@ describe("resources.transform", function()
   end)
 
   it("carries crop attributes through", function()
-    local out = run('{crop-start-line: 10, crop-end-line: 42}\n![](code/cli.rb)\n')
-    assert.is_truthy(out:find('crop-start-line="10"', 1, true))
+    local out = run('{crop-start: 10, crop-end: 42}\n![](code/cli.rb)\n')
+    assert.is_truthy(out:find('crop-start="10"', 1, true))
   end)
 
-  it("accepts legacy leanpub-start-line as an alias", function()
+  it("normalises legacy crop spellings to the spec names", function()
     local out = run('{leanpub-start-line: 3}\n![](code/cli.rb)\n')
-    assert.is_truthy(out:find('crop-start-line="3"', 1, true))
+    assert.is_truthy(out:find('crop-start="3"', 1, true))
+    local suffixed = run('{crop-start-line: 7}\n![](code/cli.rb)\n')
+    assert.is_truthy(suffixed:find('crop-start="7"', 1, true))
   end)
 
   it("leaves plain images alone", function()
@@ -3179,9 +3181,15 @@ local function belongs_to_blocks(parsed)
   return saw_key
 end
 
+-- The Markua spec names these `crop-start` and `crop-end`. The `-line` suffixed
+-- spellings and the `leanpub-` ones are real-world variants that appear in
+-- manuscripts; normalize every spelling to the spec name so exactly one key
+-- reaches the filter.
 local LEGACY_ALIAS = {
-  ["leanpub-start-line"] = "crop-start-line",
-  ["leanpub-end-line"] = "crop-end-line",
+  ["leanpub-start-line"] = "crop-start",
+  ["leanpub-end-line"] = "crop-end",
+  ["crop-start-line"] = "crop-start",
+  ["crop-end-line"] = "crop-end",
 }
 
 function M.kind(path)
@@ -3625,16 +3633,38 @@ set -euo pipefail
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-# A code resource must reach the output as real code, not as nothing.
+# Assert on the native AST, not HTML. A span that merely carries the code as
+# text renders "puts" in HTML too, so only the node type proves the lowering
+# happened.
 printf 'puts "hi"\n' > "$tmp/hello.rb"
 printf '![](hello.rb)\n' > "$tmp/code.md"
-out=$(pandoc --from=src/markua.lua --to=html \
+out=$(pandoc --from=src/markua.lua --to=native \
       --lua-filter=src/filters/resources.lua \
       --resource-path="$tmp" "$tmp/code.md")
 case "$out" in
-    *'puts'*) echo "ok   code resource lowered to a real code block" ;;
-    *) echo "FAIL: code resource produced no content"; exit 1 ;;
+    *CodeBlock*puts*) echo "ok   code resource lowered to a real CodeBlock" ;;
+    *) echo "FAIL: code resource did not become a CodeBlock"; exit 1 ;;
 esac
+
+# The table branch is a separate code path and needs its own case.
+printf 'name,count\nB-tree,3\n' > "$tmp/data.csv"
+printf '![](data.csv)\n' > "$tmp/table.md"
+out=$(pandoc --from=src/markua.lua --to=native \
+      --lua-filter=src/filters/resources.lua \
+      --resource-path="$tmp" "$tmp/table.md")
+case "$out" in
+    *Table*) echo "ok   table resource lowered to a real Table" ;;
+    *) echo "FAIL: table resource did not become a Table"; exit 1 ;;
+esac
+
+# A missing resource must fail loudly rather than emitting an empty block.
+printf '![](nope.rb)\n' > "$tmp/missing.md"
+if pandoc --from=src/markua.lua --to=native \
+      --lua-filter=src/filters/resources.lua \
+      --resource-path="$tmp" "$tmp/missing.md" >/dev/null 2>&1; then
+    echo "FAIL: a missing resource converted successfully"; exit 1
+fi
+echo "ok   missing resource fails loudly"
 ```
 
 ```bash
@@ -3657,6 +3687,14 @@ Create `src/filters/resources.lua`:
 -- and runs before pandoc exists. Reading happens here, where PANDOC_STATE
 -- makes the resource path available.
 local function read_file(src)
+  -- Markua allows a resource to be an absolute web URL. Joining one onto a
+  -- resource-path directory yields "resources/https://host/x.rb" and fails as a
+  -- missing file, which tells the author nothing. Name the case instead.
+  -- pandoc.mediabag.fetch is the resolver to reach for if web resources come
+  -- into scope; until then this is a clear refusal, not a confusing error.
+  if src:match("^https?://") then
+    return nil, "web resources are not supported: " .. src
+  end
   for _, dir in ipairs(PANDOC_STATE.resource_path or { "." }) do
     local path = (dir == "." and src) or (dir .. "/" .. src)
     local fh = io.open(path, "r")
@@ -3669,10 +3707,10 @@ local function read_file(src)
   return nil
 end
 
---- Apply Markua crop-start-line / crop-end-line to an already-read body.
+--- Apply Markua crop-start / crop-end to an already-read body.
 local function crop(body, attrs)
-  local first = tonumber(attrs["crop-start-line"])
-  local last = tonumber(attrs["crop-end-line"])
+  local first = tonumber(attrs["crop-start"])
+  local last = tonumber(attrs["crop-end"])
   if not first and not last then
     return body
   end
@@ -3698,9 +3736,9 @@ function Para(el)
   end
 
   if span.classes:includes("code-resource") then
-    local body = read_file(src)
+    local body, err = read_file(src)
     if not body then
-      error("cannot read code resource: " .. src, 0)
+      error(err or ("cannot read code resource: " .. src), 0)
     end
     local lang = span.attributes["format"] or src:match("%.([%w]+)$") or ""
     return pandoc.CodeBlock(crop(body, span.attributes),
@@ -3708,9 +3746,9 @@ function Para(el)
   end
 
   if span.classes:includes("table-resource") then
-    local body = read_file(src)
+    local body, err = read_file(src)
     if not body then
-      error("cannot read table resource: " .. src, 0)
+      error(err or ("cannot read table resource: " .. src), 0)
     end
     -- Delegate CSV parsing to pandoc rather than hand-rolling quote handling.
     local parsed = pandoc.read(body, "csv")
@@ -3722,7 +3760,8 @@ end
 - [ ] **Step 4: Run the test and make sure it passes**
 
 Run: `./test/filters.sh`
-Expected: `ok   code resource lowered to a real code block`
+Expected: three `ok` lines — `code resource lowered to a real CodeBlock`,
+`table resource lowered to a real Table`, and `missing resource fails loudly`
 
 - [ ] **Step 5: Wire it into the justfile**
 
