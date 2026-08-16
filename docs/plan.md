@@ -3598,6 +3598,9 @@ git commit -m "feat: pandoc custom reader entry point with golden tests"
 **Files:**
 
 - Create: `src/filters/resources.lua`
+- Create: `test/filters.sh` — the shared filter-integration harness. This is the
+  first filter task, so it creates the harness; Tasks 10, 10a and 11 add their
+  assertions to it.
 
 **Interfaces:**
 
@@ -3609,7 +3612,41 @@ in it, and the conversion exits 0. Video and audio stay out of scope (see the
 out-of-scope list): neither has a print target and pandoc has no native node
 for either, so their spans remain annotations for a downstream filter.
 
-- [ ] **Step 1: Write the filter**
+- [ ] **Step 1: Write the failing test**
+
+Create `test/filters.sh`. The preamble here is shared: every later filter task
+appends its assertions below this block and reuses `$tmp`.
+
+```bash
+#!/usr/bin/env bash
+# Filter integration tests: build real output and assert on it.
+set -euo pipefail
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# A code resource must reach the output as real code, not as nothing.
+printf 'puts "hi"\n' > "$tmp/hello.rb"
+printf '![](hello.rb)\n' > "$tmp/code.md"
+out=$(pandoc --from=src/markua.lua --to=html \
+      --lua-filter=src/filters/resources.lua \
+      --resource-path="$tmp" "$tmp/code.md")
+case "$out" in
+    *'puts'*) echo "ok   code resource lowered to a real code block" ;;
+    *) echo "FAIL: code resource produced no content"; exit 1 ;;
+esac
+```
+
+```bash
+chmod +x test/filters.sh
+```
+
+- [ ] **Step 2: Run it to make sure it fails**
+
+Run: `./test/filters.sh`
+Expected: FAIL — `src/filters/resources.lua` does not exist
+
+- [ ] **Step 3: Implement the minimal code to make the test pass**
 
 Create `src/filters/resources.lua`:
 
@@ -3682,27 +3719,27 @@ function Para(el)
 end
 ```
 
-- [ ] **Step 2: Test it**
+- [ ] **Step 4: Run the test and make sure it passes**
 
-Add to `test/filters.sh`. A code resource must reach the output as real code,
-not as nothing:
+Run: `./test/filters.sh`
+Expected: `ok   code resource lowered to a real code block`
 
-```bash
-printf 'puts "hi"\n' > "$tmp/hello.rb"
-printf '![](hello.rb)\n' > "$tmp/code.md"
-out=$(pandoc --from=src/markua.lua --to=html \
-      --lua-filter=src/filters/resources.lua \
-      --resource-path="$tmp" "$tmp/code.md")
-case "$out" in
-    *'puts'*) echo "ok   code resource lowered to a real code block" ;;
-    *) echo "FAIL: code resource produced no content"; exit 1 ;;
-esac
+- [ ] **Step 5: Wire it into the justfile**
+
+In `justfile`, add the recipe and extend `test`:
+
+```just
+test: unit golden filters
+
+# Builds real output through the filters and asserts on it.
+filters:
+    ./test/filters.sh
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/filters/resources.lua test/filters.sh
+git add src/filters/resources.lua test/filters.sh justfile
 git commit -m "feat: lower code and table resources into real blocks"
 ```
 
@@ -3713,7 +3750,7 @@ git commit -m "feat: lower code and table resources into real blocks"
 **Files:**
 
 - Create: `src/filters/index-xe.lua`
-- Create: `test/filters.sh`
+- Modify: `test/filters.sh` (created by Task 9a)
 
 **Interfaces:**
 
@@ -3722,16 +3759,10 @@ git commit -m "feat: lower code and table resources into real blocks"
 
 - [ ] **Step 1: Write the failing test**
 
-Create `test/filters.sh`:
+Add to `test/filters.sh`, below Task 9a's assertions — the shebang, `set -euo
+pipefail`, `$tmp` and its `trap` are already established there:
 
 ```bash
-#!/usr/bin/env bash
-# Filter integration tests: build a DOCX and assert on its XML.
-set -euo pipefail
-
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
-
 pandoc --from=src/markua.lua --to=docx \
     --lua-filter=src/filters/index-xe.lua \
     test/golden/index-entries.md -o "$tmp/out.docx"
@@ -3750,10 +3781,6 @@ if ! grep -q 'XE "Trees:B-tree"' "$tmp/document.xml"; then
     echo "FAIL: index hierarchy not translated to a Word subentry"; exit 1
 fi
 echo "ok   index-xe produced $count Word index fields, hierarchy preserved"
-```
-
-```bash
-chmod +x test/filters.sh
 ```
 
 - [ ] **Step 2: Run it to make sure it fails**
@@ -3801,24 +3828,16 @@ end
 - [ ] **Step 4: Run the test and make sure it passes**
 
 Run: `./test/filters.sh`
-Expected: `ok   index-xe produced 2 Word index fields`
+Expected: `ok   index-xe produced 3 Word index fields, hierarchy preserved`
 
-- [ ] **Step 5: Wire it into the justfile**
+The fixture carries three entries — `{ix: "B-tree"}`, `{i: "token"}`, and the
+hierarchy case `{ix: "Trees!B-tree"}` — so three is the correct count. The
+`filters` recipe is already wired into the justfile by Task 9a.
 
-In `justfile`, add the recipe and extend `test`:
-
-```just
-test: unit golden filters
-
-# Builds real DOCX files and asserts on their XML.
-filters:
-    ./test/filters.sh
-```
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/filters/index-xe.lua test/filters.sh justfile
+git add src/filters/index-xe.lua test/filters.sh
 git commit -m "feat: lower index spans to Word XE index fields"
 ```
 
