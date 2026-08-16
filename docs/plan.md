@@ -4405,6 +4405,25 @@ Recorded so they are decisions rather than oversights:
 
 ## Deferred / Open Questions
 
+### From the 2026-08-16 spec sweep
+
+- **Insertion directives are unhandled and would abort a real manuscript** — Task 5 (blocks.lua)
+
+  Markua defines brace-only *insertion directives* that place generated content;
+  `{index}` positions the automatically-generated back-of-book index. Task 5's
+  `MATTER` table recognizes only `frontmatter`, `mainmatter` and `backmatter`, and
+  the Global Constraints make an unrecognized `{...}` attribute line a hard error.
+  A manuscript that places its own index therefore aborts the conversion — in the
+  one tool whose headline feature is carrying index entries into Word.
+
+  Confirmed from the spec source that `{index}` is an insertion directive; the
+  full directive set could not be enumerated, because the manual's section pages
+  return their table of contents rather than the section body. Settle two things
+  before Task 5 ships: the complete directive list, and what each should become.
+  Pandoc has no native node for a generated index, so the likely shape is the
+  self-closing marker `blocks.transform` already emits for matter directives,
+  leaving placement to a filter — but that is a decision, not a default.
+
 ### From 2026-08-08 review
 
 Five of the six items raised in review were settled and moved to Key Technical
