@@ -3084,13 +3084,15 @@ describe("resources.transform", function()
   end)
 
   it("carries crop attributes through", function()
-    local out = run('{crop-start-line: 10, crop-end-line: 42}\n![](code/cli.rb)\n')
-    assert.is_truthy(out:find('crop-start-line="10"', 1, true))
+    local out = run('{crop-start: 10, crop-end: 42}\n![](code/cli.rb)\n')
+    assert.is_truthy(out:find('crop-start="10"', 1, true))
   end)
 
-  it("accepts legacy leanpub-start-line as an alias", function()
+  it("normalises legacy crop spellings to the spec names", function()
     local out = run('{leanpub-start-line: 3}\n![](code/cli.rb)\n')
-    assert.is_truthy(out:find('crop-start-line="3"', 1, true))
+    assert.is_truthy(out:find('crop-start="3"', 1, true))
+    local suffixed = run('{crop-start-line: 7}\n![](code/cli.rb)\n')
+    assert.is_truthy(suffixed:find('crop-start="7"', 1, true))
   end)
 
   it("leaves plain images alone", function()
@@ -3179,9 +3181,15 @@ local function belongs_to_blocks(parsed)
   return saw_key
 end
 
+-- The Markua spec names these `crop-start` and `crop-end`. The `-line` suffixed
+-- spellings and the `leanpub-` ones are real-world variants that appear in
+-- manuscripts; normalize every spelling to the spec name so exactly one key
+-- reaches the filter.
 local LEGACY_ALIAS = {
-  ["leanpub-start-line"] = "crop-start-line",
-  ["leanpub-end-line"] = "crop-end-line",
+  ["leanpub-start-line"] = "crop-start",
+  ["leanpub-end-line"] = "crop-end",
+  ["crop-start-line"] = "crop-start",
+  ["crop-end-line"] = "crop-end",
 }
 
 function M.kind(path)
@@ -3593,12 +3601,195 @@ git commit -m "feat: pandoc custom reader entry point with golden tests"
 
 ---
 
+### Task 9a: Code and table resource lowering
+
+**Files:**
+
+- Create: `src/filters/resources.lua`
+- Create: `test/filters.sh` — the shared filter-integration harness. This is the
+  first filter task, so it creates the harness; Tasks 10, 10a and 11 add their
+  assertions to it.
+
+**Interfaces:**
+
+- Consumes: `.code-resource` and `.table-resource` spans from `resources.transform`.
+- Produces: a real `CodeBlock` and a real `Table` respectively, so the content reaches every writer instead of rendering as nothing.
+
+Without this filter a manuscript's code samples convert to a book with no code
+in it, and the conversion exits 0. Video and audio stay out of scope (see the
+out-of-scope list): neither has a print target and pandoc has no native node
+for either, so their spans remain annotations for a downstream filter.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `test/filters.sh`. The preamble here is shared: every later filter task
+appends its assertions below this block and reuses `$tmp`.
+
+```bash
+#!/usr/bin/env bash
+# Filter integration tests: build real output and assert on it.
+set -euo pipefail
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# Assert on the native AST, not HTML. A span that merely carries the code as
+# text renders "puts" in HTML too, so only the node type proves the lowering
+# happened.
+printf 'puts "hi"\n' > "$tmp/hello.rb"
+printf '![](hello.rb)\n' > "$tmp/code.md"
+out=$(pandoc --from=src/markua.lua --to=native \
+      --lua-filter=src/filters/resources.lua \
+      --resource-path="$tmp" "$tmp/code.md")
+case "$out" in
+    *CodeBlock*puts*) echo "ok   code resource lowered to a real CodeBlock" ;;
+    *) echo "FAIL: code resource did not become a CodeBlock"; exit 1 ;;
+esac
+
+# The table branch is a separate code path and needs its own case.
+printf 'name,count\nB-tree,3\n' > "$tmp/data.csv"
+printf '![](data.csv)\n' > "$tmp/table.md"
+out=$(pandoc --from=src/markua.lua --to=native \
+      --lua-filter=src/filters/resources.lua \
+      --resource-path="$tmp" "$tmp/table.md")
+case "$out" in
+    *Table*) echo "ok   table resource lowered to a real Table" ;;
+    *) echo "FAIL: table resource did not become a Table"; exit 1 ;;
+esac
+
+# A missing resource must fail loudly rather than emitting an empty block.
+printf '![](nope.rb)\n' > "$tmp/missing.md"
+if pandoc --from=src/markua.lua --to=native \
+      --lua-filter=src/filters/resources.lua \
+      --resource-path="$tmp" "$tmp/missing.md" >/dev/null 2>&1; then
+    echo "FAIL: a missing resource converted successfully"; exit 1
+fi
+echo "ok   missing resource fails loudly"
+```
+
+```bash
+chmod +x test/filters.sh
+```
+
+- [ ] **Step 2: Run it to make sure it fails**
+
+Run: `./test/filters.sh`
+Expected: FAIL — `src/filters/resources.lua` does not exist
+
+- [ ] **Step 3: Implement the minimal code to make the test pass**
+
+Create `src/filters/resources.lua`:
+
+```lua
+--- Lower non-image resource spans into real pandoc blocks.
+--
+-- resources.transform annotates these but cannot read files: it is pure Lua
+-- and runs before pandoc exists. Reading happens here, where PANDOC_STATE
+-- makes the resource path available.
+local function read_file(src)
+  -- Markua allows a resource to be an absolute web URL. Joining one onto a
+  -- resource-path directory yields "resources/https://host/x.rb" and fails as a
+  -- missing file, which tells the author nothing. Name the case instead.
+  -- pandoc.mediabag.fetch is the resolver to reach for if web resources come
+  -- into scope; until then this is a clear refusal, not a confusing error.
+  if src:match("^https?://") then
+    return nil, "web resources are not supported: " .. src
+  end
+  for _, dir in ipairs(PANDOC_STATE.resource_path or { "." }) do
+    local path = (dir == "." and src) or (dir .. "/" .. src)
+    local fh = io.open(path, "r")
+    if fh then
+      local body = fh:read("a")
+      fh:close()
+      return body
+    end
+  end
+  return nil
+end
+
+--- Apply Markua crop-start / crop-end to an already-read body.
+local function crop(body, attrs)
+  local first = tonumber(attrs["crop-start"])
+  local last = tonumber(attrs["crop-end"])
+  if not first and not last then
+    return body
+  end
+  local kept, n = {}, 0
+  for line in (body .. "\n"):gmatch("(.-)\n") do
+    n = n + 1
+    if (not first or n >= first) and (not last or n <= last) then
+      kept[#kept + 1] = line
+    end
+  end
+  return table.concat(kept, "\n")
+end
+
+function Para(el)
+  -- A resource span is the whole paragraph; pandoc has already wrapped it.
+  if #el.content ~= 1 or el.content[1].t ~= "Span" then
+    return nil
+  end
+  local span = el.content[1]
+  local src = span.attributes["src"]
+  if not src then
+    return nil
+  end
+
+  if span.classes:includes("code-resource") then
+    local body, err = read_file(src)
+    if not body then
+      error(err or ("cannot read code resource: " .. src), 0)
+    end
+    local lang = span.attributes["format"] or src:match("%.([%w]+)$") or ""
+    return pandoc.CodeBlock(crop(body, span.attributes),
+                            pandoc.Attr(span.identifier, { lang }, {}))
+  end
+
+  if span.classes:includes("table-resource") then
+    local body, err = read_file(src)
+    if not body then
+      error(err or ("cannot read table resource: " .. src), 0)
+    end
+    -- Delegate CSV parsing to pandoc rather than hand-rolling quote handling.
+    local parsed = pandoc.read(body, "csv")
+    return parsed.blocks
+  end
+end
+```
+
+- [ ] **Step 4: Run the test and make sure it passes**
+
+Run: `./test/filters.sh`
+Expected: three `ok` lines — `code resource lowered to a real CodeBlock`,
+`table resource lowered to a real Table`, and `missing resource fails loudly`
+
+- [ ] **Step 5: Wire it into the justfile**
+
+In `justfile`, add the recipe and extend `test`:
+
+```just
+test: unit golden filters
+
+# Builds real output through the filters and asserts on it.
+filters:
+    ./test/filters.sh
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/filters/resources.lua test/filters.sh justfile
+git commit -m "feat: lower code and table resources into real blocks"
+```
+
+---
+
 ### Task 10: Index-to-Word-XE filter
 
 **Files:**
 
 - Create: `src/filters/index-xe.lua`
-- Create: `test/filters.sh`
+- Modify: `test/filters.sh` (created by Task 9a)
 
 **Interfaces:**
 
@@ -3607,16 +3798,10 @@ git commit -m "feat: pandoc custom reader entry point with golden tests"
 
 - [ ] **Step 1: Write the failing test**
 
-Create `test/filters.sh`:
+Add to `test/filters.sh`, below Task 9a's assertions — the shebang, `set -euo
+pipefail`, `$tmp` and its `trap` are already established there:
 
 ```bash
-#!/usr/bin/env bash
-# Filter integration tests: build a DOCX and assert on its XML.
-set -euo pipefail
-
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
-
 pandoc --from=src/markua.lua --to=docx \
     --lua-filter=src/filters/index-xe.lua \
     test/golden/index-entries.md -o "$tmp/out.docx"
@@ -3635,10 +3820,6 @@ if ! grep -q 'XE "Trees:B-tree"' "$tmp/document.xml"; then
     echo "FAIL: index hierarchy not translated to a Word subentry"; exit 1
 fi
 echo "ok   index-xe produced $count Word index fields, hierarchy preserved"
-```
-
-```bash
-chmod +x test/filters.sh
 ```
 
 - [ ] **Step 2: Run it to make sure it fails**
@@ -3686,24 +3867,16 @@ end
 - [ ] **Step 4: Run the test and make sure it passes**
 
 Run: `./test/filters.sh`
-Expected: `ok   index-xe produced 2 Word index fields`
+Expected: `ok   index-xe produced 3 Word index fields, hierarchy preserved`
 
-- [ ] **Step 5: Wire it into the justfile**
+The fixture carries three entries — `{ix: "B-tree"}`, `{i: "token"}`, and the
+hierarchy case `{ix: "Trees!B-tree"}` — so three is the correct count. The
+`filters` recipe is already wired into the justfile by Task 9a.
 
-In `justfile`, add the recipe and extend `test`:
-
-```just
-test: unit golden filters
-
-# Builds real DOCX files and asserts on their XML.
-filters:
-    ./test/filters.sh
-```
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/filters/index-xe.lua test/filters.sh justfile
+git add src/filters/index-xe.lua test/filters.sh
 git commit -m "feat: lower index spans to Word XE index fields"
 ```
 
@@ -3876,121 +4049,6 @@ echo "ok   index spans round-trip through docx"
 ```bash
 git add src/filters/index-latex.lua src/filters/index-docbook.lua test/filters.sh
 git commit -m "feat: lower index spans for latex and docbook"
-```
-
----
-
-### Task 11a: Code and table resource lowering
-
-**Files:**
-
-- Create: `src/filters/resources.lua`
-
-**Interfaces:**
-
-- Consumes: `.code-resource` and `.table-resource` spans from `resources.transform`.
-- Produces: a real `CodeBlock` and a real `Table` respectively, so the content reaches every writer instead of rendering as nothing.
-
-Without this filter a manuscript's code samples convert to a book with no code
-in it, and the conversion exits 0. Video and audio stay out of scope (see the
-out-of-scope list): neither has a print target and pandoc has no native node
-for either, so their spans remain annotations for a downstream filter.
-
-- [ ] **Step 1: Write the filter**
-
-Create `src/filters/resources.lua`:
-
-```lua
---- Lower non-image resource spans into real pandoc blocks.
---
--- resources.transform annotates these but cannot read files: it is pure Lua
--- and runs before pandoc exists. Reading happens here, where PANDOC_STATE
--- makes the resource path available.
-local function read_file(src)
-  for _, dir in ipairs(PANDOC_STATE.resource_path or { "." }) do
-    local path = (dir == "." and src) or (dir .. "/" .. src)
-    local fh = io.open(path, "r")
-    if fh then
-      local body = fh:read("a")
-      fh:close()
-      return body
-    end
-  end
-  return nil
-end
-
---- Apply Markua crop-start-line / crop-end-line to an already-read body.
-local function crop(body, attrs)
-  local first = tonumber(attrs["crop-start-line"])
-  local last = tonumber(attrs["crop-end-line"])
-  if not first and not last then
-    return body
-  end
-  local kept, n = {}, 0
-  for line in (body .. "\n"):gmatch("(.-)\n") do
-    n = n + 1
-    if (not first or n >= first) and (not last or n <= last) then
-      kept[#kept + 1] = line
-    end
-  end
-  return table.concat(kept, "\n")
-end
-
-function Para(el)
-  -- A resource span is the whole paragraph; pandoc has already wrapped it.
-  if #el.content ~= 1 or el.content[1].t ~= "Span" then
-    return nil
-  end
-  local span = el.content[1]
-  local src = span.attributes["src"]
-  if not src then
-    return nil
-  end
-
-  if span.classes:includes("code-resource") then
-    local body = read_file(src)
-    if not body then
-      error("cannot read code resource: " .. src, 0)
-    end
-    local lang = span.attributes["format"] or src:match("%.([%w]+)$") or ""
-    return pandoc.CodeBlock(crop(body, span.attributes),
-                            pandoc.Attr(span.identifier, { lang }, {}))
-  end
-
-  if span.classes:includes("table-resource") then
-    local body = read_file(src)
-    if not body then
-      error("cannot read table resource: " .. src, 0)
-    end
-    -- Delegate CSV parsing to pandoc rather than hand-rolling quote handling.
-    local parsed = pandoc.read(body, "csv")
-    return parsed.blocks
-  end
-end
-```
-
-- [ ] **Step 2: Test it**
-
-Add to `test/filters.sh`. A code resource must reach the output as real code,
-not as nothing:
-
-```bash
-printf 'puts "hi"\n' > "$tmp/hello.rb"
-printf '![](hello.rb)\n' > "$tmp/code.md"
-out=$(pandoc --from=src/markua.lua --to=html \
-      --lua-filter=src/filters/resources.lua \
-      --resource-path="$tmp" "$tmp/code.md")
-case "$out" in
-    *'puts'*) echo "ok   code resource lowered to a real code block" ;;
-    *) echo "FAIL: code resource produced no content"; exit 1 ;;
-esac
-```
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/filters/resources.lua test/filters.sh
-git commit -m "feat: lower code and table resources into real blocks"
 ```
 
 ---
@@ -4339,13 +4397,32 @@ Recorded so they are decisions rather than oversights:
 - **Quizzes and exercises** (Markua 0.10 course constructs). Rejected with a clear error by Task 8.
 - **Smart crosslinks** (`[](#id)` auto-generating link text from the target heading). Requires a second pass over the whole document to resolve titles; the reader is per-file. Add as a filter later.
 - **`Book.txt` multi-file assembly.** The reader converts one file at a time; ordering is the caller's job. A `--book` mode in `bin/markua` is the natural follow-up.
-- **Video and audio resource lowering.** `resources.lua` still classifies them and emits an annotated span, but no filter lowers that span into a writer construct. Neither has a print target, and pandoc has no native node for either. Code and CSV-table resources *are* lowered (Task 11a).
+- **Video and audio resource lowering.** `resources.lua` still classifies them and emits an annotated span, but no filter lowers that span into a writer construct. Neither has a print target, and pandoc has no native node for either. Code and CSV-table resources *are* lowered (Task 9a).
 - **Emoji shortcodes and Font Awesome** (`:joy:`, `:fa-github:`). Pandoc's `emoji` extension covers the first; Font Awesome has no sensible print target.
 - **Leanpub document settings** (`bookfilename`, `soft-breaks`). Parsed and ignored; they configure Leanpub's build, not pandoc's.
 
 ---
 
 ## Deferred / Open Questions
+
+### From the 2026-08-16 spec sweep
+
+- **Insertion directives are unhandled and would abort a real manuscript** — Task 5 (blocks.lua)
+
+  Markua defines brace-only *insertion directives* that place generated content;
+  `{index}` positions the automatically-generated back-of-book index. Task 5's
+  `MATTER` table recognizes only `frontmatter`, `mainmatter` and `backmatter`, and
+  the Global Constraints make an unrecognized `{...}` attribute line a hard error.
+  A manuscript that places its own index therefore aborts the conversion — in the
+  one tool whose headline feature is carrying index entries into Word.
+
+  Confirmed from the spec source that `{index}` is an insertion directive; the
+  full directive set could not be enumerated, because the manual's section pages
+  return their table of contents rather than the section body. Settle two things
+  before Task 5 ships: the complete directive list, and what each should become.
+  Pandoc has no native node for a generated index, so the likely shape is the
+  self-closing marker `blocks.transform` already emits for matter directives,
+  leaving placement to a filter — but that is a decision, not a default.
 
 ### From 2026-08-08 review
 
