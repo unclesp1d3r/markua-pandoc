@@ -3,13 +3,17 @@
 -- U1 shipped the pass skeleton: fence passthrough, and the pending
 -- attribute-list lifecycle every later block construct binds into. U2 adds
 -- `B>` runs and the fenced `{blurb}` … `{/blurb}` form, both producing the
--- same callout div. The C/D/E/I/Q/T/W/X> sugar prefixes (U3), `A>` and
--- fenced `{aside}` handling (U4), and the bare-word directive table (U5)
--- each add a branch to the attribute-line and prefix dispatch below, ahead
--- of the generic "unclaimed attribute list" fallback U1 builds. None of
--- those branches exist yet: a bare word like "pagebreak" still falls
--- through to that fallback, exactly like any other list this pass does not
--- recognize.
+-- same callout div. U4 adds `A>` runs and the fenced `{aside}` … `{/aside}`
+-- form -- sharing U2's consume-until-close loop and class-resolution
+-- machinery, but a bare aside has no callout-class default the way a bare
+-- blurb defaults to `information` (R4 vs R11), and a pending attribute list
+-- above an `A>` run is applied rather than rejected the way one above a
+-- fenced opener is (KTD7). The C/D/E/I/Q/T/W/X> sugar prefixes (U3) and the
+-- bare-word directive table (U5) each add a branch to the attribute-line and
+-- prefix dispatch below, ahead of the generic "unclaimed attribute list"
+-- fallback U1 builds. Those branches don't exist yet: a bare word like
+-- "pagebreak" still falls through to that fallback, exactly like any other
+-- list this pass does not recognize.
 local attributes = require("src.markua.attributes")
 local config = require("src.markua.config")
 local errors = require("src.markua.errors")
@@ -164,13 +168,52 @@ function M.transform(lines, cfg, file)
     emit("::: {" .. table.concat(parts, " ") .. "}")
   end
 
+  -- Unlike a blurb, a bare aside has no callout-class default: `A>` alone
+  -- and an empty `{aside}` both emit exactly `::: {.aside}` (R11, R12) --
+  -- Task 11's downstream filter and issue #6's table expect that bare
+  -- shape, so there is no `information` fallback to reach for here the way
+  -- callout_classes gives blurbs. A non-empty class list resolves through
+  -- the same resolve_callout_class a blurb's does, so a bad class raises
+  -- identically in both constructs (KTD7).
+  local function open_aside(classes, line)
+    if not classes or #classes == 0 then
+      emit("::: {.aside}")
+    else
+      local head, decoratives = resolve_callout_class(classes, cfg, file, line)
+      open_div(head, decoratives, "aside")
+    end
+  end
+
+  -- Consume lines up to (not including) the fenced closer for `marker`,
+  -- shared by the {blurb} and {aside} fenced forms (R3, R12): a code sample
+  -- inside the body can legitimately contain the closing text, so only a
+  -- matching line OUTSIDE a fence terminates the construct (R10), and the
+  -- closer word is taken from `marker` rather than hardcoded so this one
+  -- loop can never let a {blurb} div wait on {/aside} or vice versa.
+  local function consume_until_close(marker, opened_at)
+    local closer = "^%s*{/" .. marker .. "}%s*$"
+    i = i + 1
+    while i <= #lines and not (not lines[i].in_code and lines[i].text:match(closer)) do
+      emit_body(lines[i].text)
+      i = i + 1
+    end
+    if i > #lines then
+      -- R9/R12: a block running silently to end of input is exactly what
+      -- this guards against. Position the error at the opener, not here,
+      -- since "here" is past the last line an author can point to.
+      errors.raise(file, opened_at, "unclosed {" .. marker .. "} opened here")
+    end
+    emit(":::")
+    i = i + 1
+  end
+
   -- Nothing may see a pending attribute list and quietly forget it. Every
   -- exit from the pending state goes through here, so an unclaimed list
   -- aborts with its own line number instead of leaking braces into the book
   -- or vanishing (R21). Called as the FIRST action of any branch that does
   -- not consume the pending list itself -- the branches that do consume it
-  -- (headings and B> runs here, plus the sugar prefixes and A> once U3-U4
-  -- add them) are untouched by this rule.
+  -- (headings, B> runs, and A> runs here, plus the sugar prefixes once U3
+  -- adds them) are untouched by this rule.
   local function reject_pending(reason)
     if not pending then
       return
@@ -213,33 +256,43 @@ function M.transform(lines, cfg, file)
         reject_pending("attribute list may not precede a fenced {blurb} opener")
         local head, decoratives = callout_classes(parsed.classes, cfg, file, rec.number)
         open_div(head, decoratives, "blurb")
-        local opened_at = rec.number
-        i = i + 1
-        -- A code sample inside the blurb body can legitimately contain the
-        -- text "{/blurb}"; only a matching line OUTSIDE a fence terminates
-        -- the construct (R10).
-        while i <= #lines and not (not lines[i].in_code and lines[i].text:match("^%s*{/blurb}%s*$")) do
-          emit_body(lines[i].text)
-          i = i + 1
-        end
-        if i > #lines then
-          -- R9: a block running silently to end of input is exactly what
-          -- this guards against. Position the error at the opener, not here,
-          -- since "here" is past the last line an author can point to.
-          errors.raise(file, opened_at, "unclosed {blurb} opened here")
-        end
-        emit(":::")
-        i = i + 1
+        consume_until_close("blurb", rec.number)
+      elseif #parsed.bare == 1 and parsed.bare[1] == "aside" then
+        -- Fenced form: {aside, class: X} ... {/aside}. Sibling of the {blurb}
+        -- branch above -- a preceding list is illegal here too (R13a,
+        -- KTD7), rejected before this branch emits anything of its own --
+        -- but open_aside (unlike callout_classes) has no default class to
+        -- fall back to when parsed.classes is empty (R12).
+        reject_pending("attribute list may not precede a fenced {aside} opener")
+        open_aside(parsed.classes, rec.number)
+        consume_until_close("aside", rec.number)
       else
-        -- U4 inserts a branch here for "aside", U5 for the full directive
-        -- table. Until they land, every other attribute list -- including a
-        -- bare-word directive line -- falls through to this generic swap,
-        -- which is what keeps it from silently binding to whatever line
-        -- happens to follow it.
+        -- U5 inserts a branch here for the full directive table. Until it
+        -- lands, every other attribute list -- including a bare-word
+        -- directive line -- falls through to this generic swap, which is
+        -- what keeps it from silently binding to whatever line happens to
+        -- follow it.
         reject_pending()               -- a new list may not shadow an unused one
         pending, pending_line, pending_text = parsed, rec.number, text
         i = i + 1
       end
+
+    elseif text:match("^A>") then
+      -- A> run: unlike a fenced {aside} opener, a pending list here is
+      -- APPLIED rather than rejected (KTD7) -- open_aside resolves it
+      -- exactly as the fenced form does, falling back to the bare
+      -- `::: {.aside}` shape when no list precedes the run at all (R11).
+      if pending then
+        open_aside(pending.classes, pending_line)
+        pending, pending_line, pending_text = nil, nil, nil
+      else
+        open_aside({}, rec.number)
+      end
+      while i <= #lines and lines[i].text:match("^A>") do
+        emit_body(strip_prefix(lines[i].text, "A>"))
+        i = i + 1
+      end
+      emit(":::")
 
     elseif text:match("^B>") then
       -- B> run: consumes a pending list if one precedes it (R2), or defaults

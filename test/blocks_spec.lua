@@ -240,3 +240,64 @@ describe("blocks.transform blurbs", function()
     assert.is_truthy(out:find("::: {.information .blurb}", 1, true))
   end)
 end)
+
+-- U4: A> runs and the fenced {aside} ... {/aside} form. A bare aside has no
+-- callout-class default (unlike a blurb's `information`, R4); a pending
+-- attribute list above an A> run is APPLIED, not dropped (KTD7), while one
+-- above a fenced opener raises (R13a), mirroring the blurb prohibition.
+describe("blocks.transform asides", function()
+  it("converts an A> run with no pending attribute list into a bare aside div", function()
+    local out = run("A> ### Why\nA>\nA> Because.\n")
+    assert.is_truthy(out:find("::: {.aside}", 1, true))
+    assert.is_truthy(out:find("### Why", 1, true))
+    assert.is_truthy(out:find("Because.", 1, true))
+  end)
+
+  it("converts the fenced {aside} ... {/aside} form into the identical bare div", function()
+    local out = run("{aside}\nSome side note.\n{/aside}\n")
+    assert.is_truthy(out:find("::: {.aside}", 1, true))
+    assert.is_truthy(out:find("Some side note.", 1, true))
+  end)
+
+  it("raises on an unclosed {aside}, naming the opening line", function()
+    local ok, err = pcall(run, "{aside}\nnever closes\n")
+    assert.is_false(ok)
+    local msg = tostring(err)
+    assert.is_truthy(msg:find("unclosed", 1, true))
+    assert.is_truthy(msg:find("f.md:1", 1, true))
+  end)
+
+  it("applies a pending attribute list above an A> run instead of dropping it", function()
+    local out = run("{class: tip}\nA> hi\n")
+    assert.is_truthy(out:find("::: {.tip .aside}", 1, true))
+  end)
+
+  it("raises on an unregistered callout class above an A> run, naming the offender", function()
+    local ok, err = pcall(run, "{class: bogus}\nA> hi\n")
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("bogus", 1, true))
+  end)
+
+  it("resolves inline attributes on a fenced {aside} opener like a fenced blurb's", function()
+    local out = run("{aside, class: tip}\nhi\n{/aside}\n")
+    assert.is_truthy(out:find("::: {.tip .aside}", 1, true))
+  end)
+
+  it("raises when an attribute list precedes a fenced {aside} opener (R13a)", function()
+    local ok = pcall(run, "{class: tip}\n{aside}\nhi\n{/aside}\n")
+    assert.is_false(ok)
+  end)
+
+  it("does not let a {/aside} inside a fenced code block close the aside", function()
+    local out = run("{aside}\n```\n{/aside}\n```\nreal end\n{/aside}\n")
+    local _, count = out:gsub(":::", "")
+    assert.equals(2, count)  -- only the real opener and the real closer
+    assert.is_truthy(out:find("real end", 1, true))
+  end)
+
+  it("never transforms an A> line inside a fenced code block", function()
+    local out = run("```markua\nA> not an aside\n```\n")
+    assert.is_truthy(out:find("A> not an aside", 1, true))
+    assert.is_nil(out:find(":::", 1, true))
+  end)
+end)
