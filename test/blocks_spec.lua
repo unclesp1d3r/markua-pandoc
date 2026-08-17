@@ -147,3 +147,96 @@ describe("blocks.transform", function()
     assert.is_truthy(out:find("\\$$", 1, true))
   end)
 end)
+
+-- U2: B> runs and the fenced {blurb} ... {/blurb} form, both syntaxes
+-- producing the identical div per R3.
+describe("blocks.transform blurbs", function()
+  it("converts {class: tip} above a B> run into a fenced div", function()
+    local out = run("{class: tip}\nB> Press Ctrl-R.\n")
+    assert.is_truthy(out:find("::: {.tip .blurb}", 1, true))
+    assert.is_truthy(out:find("Press Ctrl%-R%."))
+    assert.is_truthy(out:find(":::", 1, true))
+  end)
+
+  it("puts the callout class ahead of the .blurb marker", function()
+    -- Load-bearing, not cosmetic (see the comment on open_div in blocks.lua):
+    -- pandoc's DocBook writer matches only the head of the class list.
+    local out = run("{class: tip}\nB> hi\n")
+    local blurb_at = out:find("::: {.tip .blurb}", 1, true)
+    assert.is_truthy(blurb_at)
+    -- ".blurb" must not appear before ".tip" anywhere in that same marker.
+    assert.is_nil(out:find("::: {.blurb .tip}", 1, true))
+  end)
+
+  it("converts the fenced {blurb, class: X} ... {/blurb} form identically", function()
+    local out = run("{blurb, class: warning}\nBack up first.\n{/blurb}\n")
+    assert.is_truthy(out:find("::: {.warning .blurb}", 1, true))
+    assert.is_truthy(out:find("Back up first.", 1, true))
+  end)
+
+  it("defaults a B> run with no pending attribute list to information", function()
+    local out = run("B> hi\n")
+    assert.is_truthy(out:find("::: {.information .blurb}", 1, true))
+  end)
+
+  it("carries a decorative class alongside the callout class, marker last", function()
+    -- attributes.parse splits one class: value on whitespace (KTD10b), so
+    -- {class: "tip wide"} arrives as classes = {"tip", "wide"} -- not a
+    -- per-class shorthand. The registered class heads the list, the
+    -- decorative one survives between it and the marker.
+    local out = run('{class: "tip wide"}\nB> hi\n')
+    assert.is_truthy(out:find("::: {.tip .wide .blurb}", 1, true))
+  end)
+
+  it("raises on an unregistered callout class, naming the offender", function()
+    local ok, err = pcall(run, "{class: bogus}\nB> hi\n")
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("bogus", 1, true))
+  end)
+
+  it("downgrades an unregistered callout class under --lenient, keeping the author's class", function()
+    -- AGENTS.md makes --lenient downgrade a hard error to a warning, and an
+    -- unregistered class is one. Without this the flag could recover from an
+    -- unclaimed attribute list but not from a bad class -- and a class this
+    -- book's list rejects is exactly what --lenient exists to triage, since
+    -- real Leanpub builds reject `note` and books narrow the set further.
+    local out = table.concat(blocks.transform(
+      scanner.scan("{class: bogus}\nB> hi\n"), lenient_cfg(), "f.md"), "\n")
+    assert.is_truthy(out:find("::: {.bogus .blurb}", 1, true))
+    assert.is_truthy(out:find("hi", 1, true))
+  end)
+
+  it("names the known spelling when only letter case differs (KTD8)", function()
+    local ok, err = pcall(run, "{class: Tip}\nB> hi\n")
+    assert.is_false(ok)
+    local msg = tostring(err)
+    assert.is_truthy(msg:find("Tip", 1, true))
+    assert.is_truthy(msg:find("tip", 1, true))
+  end)
+
+  it("raises on an unclosed {blurb}, naming the opening line", function()
+    local ok, err = pcall(run, "{blurb, class: tip}\nnever closes\n")
+    assert.is_false(ok)
+    local msg = tostring(err)
+    assert.is_truthy(msg:find("unclosed", 1, true))
+    assert.is_truthy(msg:find("f.md:1", 1, true))
+  end)
+
+  it("does not let a {/blurb} inside a fenced code block close the blurb", function()
+    local out = run("{blurb, class: tip}\n```\n{/blurb}\n```\nreal end\n{/blurb}\n")
+    local _, count = out:gsub(":::", "")
+    assert.equals(2, count)  -- only the real opener and the real closer
+    assert.is_truthy(out:find("real end", 1, true))
+  end)
+
+  it("escapes a ::: body line inside a B> run", function()
+    local out = run("{class: tip}\nB> before\nB> :::\nB> after\n")
+    assert.is_truthy(out:find("\\:::", 1, true))
+  end)
+
+  it("does not let a second B> run inherit an earlier run's class", function()
+    local out = run("{class: tip}\nB> first\n\nB> second\n")
+    assert.is_truthy(out:find("::: {.tip .blurb}", 1, true))
+    assert.is_truthy(out:find("::: {.information .blurb}", 1, true))
+  end)
+end)
