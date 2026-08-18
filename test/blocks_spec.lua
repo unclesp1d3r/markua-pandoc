@@ -152,6 +152,38 @@ describe("blocks.transform", function()
     assert.is_false(ok)
   end)
 
+  -- FIX 1: a pending attribute list must not survive a fenced code block and
+  -- silently bind to whatever construct follows it. Before this fix, the
+  -- `in_code` branch was the only non-consuming branch that skipped
+  -- reject_pending, so {class: tip} above a fenced sample jumped the fence
+  -- and turned a following W> (warning) into a tip -- wrong class, no error,
+  -- in strict mode.
+  it("raises in strict mode when an attribute list precedes a fenced code block", function()
+    local ok = pcall(run, "{class: tip}\n```json\n{\"a\": 1}\n```\nW> body\n")
+    assert.is_false(ok)
+  end)
+
+  it("re-emits a pending list before the fence, not after, under --lenient (FIX 1)", function()
+    local lines = run_lines("{class: tip}\n```json\n{\"a\": 1}\n```\nW> body\n", lenient_cfg())
+    local pending_index, fence_index, warning_index
+    for idx, line in ipairs(lines) do
+      if line == "{class: tip}" then
+        pending_index = idx
+      elseif line == "```json" then
+        fence_index = idx
+      elseif line == "::: {.warning .blurb}" then
+        warning_index = idx
+      end
+    end
+    assert.is_truthy(pending_index)
+    assert.is_truthy(fence_index)
+    assert.is_truthy(warning_index)
+    assert.is_true(pending_index < fence_index)
+    -- The tip class did NOT jump the fence and bind to W> -- it stayed a
+    -- warning blurb, its own implied class, not a tip.
+    assert.is_true(fence_index < warning_index)
+  end)
+
   it("escapes a standalone ::: body line so it cannot close a fence this pass opened", function()
     local out = run(":::\n")
     assert.is_truthy(out:find("\\:::", 1, true))
@@ -160,6 +192,48 @@ describe("blocks.transform", function()
   it("escapes a standalone $$ body line the same way", function()
     local out = run("$$\n")
     assert.is_truthy(out:find("\\$$", 1, true))
+  end)
+
+  -- FIX 2: the escape must catch ":::"-shaped lines carrying attributes, not
+  -- only a bare colon run. Verified against the reader's TARGET_FORMAT (see
+  -- the comment on emit_body in blocks.lua): "::: {.example}" opens a real
+  -- nested Div in pandoc's own grammar, so an unescaped instance inside a
+  -- B> body doesn't just look wrong -- the construct's own generated closer
+  -- then closes that INNER div instead of the blurb, and everything
+  -- afterward gets silently swallowed into the still-open outer div.
+  it("escapes a ::: body line that carries attributes, not only a bare colon run", function()
+    local out = run("{class: tip}\nB> ::: {.example}\nB> inside\n")
+    assert.is_truthy(out:find("\\::: {.example}", 1, true))
+  end)
+
+  it("keeps content after the construct OUTSIDE the div once the nested-looking line is escaped (FIX 2)", function()
+    -- blocks.transform's own line array can't observe pandoc's nested-Div
+    -- parsing directly (that requires the pandoc oracle, run separately) --
+    -- but it CAN pin the shape the fix depends on: exactly one opener line
+    -- and one closer line around the escaped body, with the trailing
+    -- paragraph positioned after the closer rather than swallowed into a
+    -- count that quietly shifted because the escape changed how many lines
+    -- this pass consumes.
+    local lines = run_lines("{class: tip}\nB> ::: {.example}\nB> inside\n\nAfter the blurb.\n")
+    local open_idx, escaped_idx, close_idx, after_idx
+    for idx, line in ipairs(lines) do
+      if line == "::: {.tip .blurb}" then
+        open_idx = idx
+      elseif line == "\\::: {.example}" then
+        escaped_idx = idx
+      elseif line == ":::" and open_idx and not close_idx then
+        close_idx = idx
+      elseif line == "After the blurb." then
+        after_idx = idx
+      end
+    end
+    assert.is_truthy(open_idx)
+    assert.is_truthy(escaped_idx)
+    assert.is_truthy(close_idx)
+    assert.is_truthy(after_idx)
+    assert.is_true(open_idx < escaped_idx)
+    assert.is_true(escaped_idx < close_idx)
+    assert.is_true(close_idx < after_idx)
   end)
 end)
 
@@ -274,6 +348,124 @@ describe("blocks.transform blurbs", function()
     assert.is_false(ok)
     assert.is_truthy(tostring(err):find("bad id", 1, true))
   end)
+
+  -- FIX 3: consume_until_close checked `in_code` to decide whether a line
+  -- could be the closer, but emitted every body line through emit_body
+  -- unconditionally -- so a code sample legitimately containing a bare
+  -- ":::" line, nested inside a fenced {blurb}, got a spurious backslash
+  -- injected into what the author wrote verbatim. AGENTS.md's fence-
+  -- awareness rule (content inside a fenced code block is never Markua)
+  -- applies to emission exactly as it already applied to the closer check.
+  it("does not escape a ::: line inside a fenced code block nested in a {blurb}", function()
+    local out = run("{blurb, class: tip}\n```\n:::\n```\n{/blurb}\n")
+    assert.is_nil(out:find("\\:::", 1, true))
+    assert.is_truthy(out:find("\n:::\n", 1, true))
+  end)
+
+  -- FIX 4: an unregistered callout class recovers under --lenient by
+  -- adopting the author's own class as the div's head -- but open_div runs
+  -- that head through attributes.check_name, which raises UNCONDITIONALLY
+  -- on a name pandoc's attribute grammar cannot represent. A class that is
+  -- BOTH unregistered AND unrepresentable (e.g. "3bad") therefore aborted
+  -- identically under --lenient and under strict, before resolve_callout_class
+  -- learned to check representability before adopting the head.
+  it("still raises in strict mode for a class that is both unregistered and unrepresentable", function()
+    local ok = pcall(run, '{class: "3bad"}\nB> hi\n')
+    assert.is_false(ok)
+  end)
+
+  it("falls back to information under --lenient when the recovered class is unrepresentable (FIX 4)", function()
+    local out = table.concat(blocks.transform(
+      scanner.scan('{class: "3bad"}\nB> hi\n'), lenient_cfg(), "f.md"), "\n")
+    assert.is_truthy(out:find("::: {.information .blurb}", 1, true))
+    assert.is_truthy(out:find("hi", 1, true))
+  end)
+
+  it("recovers an aside to its own bare shape, not the blurb's information default", function()
+    -- The two constructs disagree on the fallback: a blurb defaults to
+    -- `information` (R4), a bare aside carries no callout class at all (R11).
+    -- Answering `information` for both gave a recovered aside
+    -- `::: {.information .aside}`, which the callout filter styles as a
+    -- blurb -- wrong output rather than merely degraded output.
+    local out = table.concat(blocks.transform(
+      scanner.scan('{class: "3bad"}\nA> hi\n'), lenient_cfg(), "f.md"), "\n")
+    assert.is_truthy(out:find("::: {.aside}", 1, true))
+    assert.is_nil(out:find("information", 1, true))
+  end)
+
+  it("keeps a supplied id while recovering an aside under --lenient", function()
+    local out = table.concat(blocks.transform(
+      scanner.scan('{class: "3bad", id: sidebar}\nA> hi\n'), lenient_cfg(), "f.md"), "\n")
+    assert.is_truthy(out:find("::: {#sidebar .aside}", 1, true))
+  end)
+
+  -- FIX 5: id: was dropped on the fenced {blurb, id: ...} path even though
+  -- the sugar-prefix path already carried one through, silently losing a
+  -- cross-reference anchor -- the plan's R3 requires the fenced form to
+  -- produce the identical div to the run form, id included.
+  it("carries an id: through the fenced {blurb, id: ...} form", function()
+    local out = run("{blurb, class: tip, id: sidebar}\nhi\n{/blurb}\n")
+    assert.is_truthy(out:find("::: {#sidebar .tip .blurb}", 1, true))
+  end)
+
+  -- FIX 6: every prior blurb scenario only checked substring presence in a
+  -- joined string, so nothing pinned the body to actually landing BETWEEN
+  -- the opener and closer -- a reordering mutation in consume_prefixed_run
+  -- or consume_until_close would corrupt every emitted div while every
+  -- substring assertion above kept passing.
+  it("keeps a B> run's body strictly between its opener and closer", function()
+    local lines = run_lines("{class: tip}\nB> line one\nB> line two\n\nAfter.\n")
+    local open_idx, body1_idx, body2_idx, close_idx, after_idx
+    for idx, line in ipairs(lines) do
+      if line == "::: {.tip .blurb}" then
+        open_idx = idx
+      elseif line == "line one" then
+        body1_idx = idx
+      elseif line == "line two" then
+        body2_idx = idx
+      elseif line == ":::" and open_idx and not close_idx then
+        close_idx = idx
+      elseif line == "After." then
+        after_idx = idx
+      end
+    end
+    assert.is_truthy(open_idx)
+    assert.is_truthy(body1_idx)
+    assert.is_truthy(body2_idx)
+    assert.is_truthy(close_idx)
+    assert.is_truthy(after_idx)
+    assert.is_true(open_idx < body1_idx)
+    assert.is_true(body1_idx < body2_idx)
+    assert.is_true(body2_idx < close_idx)
+    assert.is_true(close_idx < after_idx)
+  end)
+
+  it("keeps a fenced {blurb} body strictly between its opener and closer", function()
+    local lines = run_lines("{blurb, class: warning}\nBack up first.\nAlso this.\n{/blurb}\n\nAfter.\n")
+    local open_idx, body1_idx, body2_idx, close_idx, after_idx
+    for idx, line in ipairs(lines) do
+      if line == "::: {.warning .blurb}" then
+        open_idx = idx
+      elseif line == "Back up first." then
+        body1_idx = idx
+      elseif line == "Also this." then
+        body2_idx = idx
+      elseif line == ":::" and open_idx and not close_idx then
+        close_idx = idx
+      elseif line == "After." then
+        after_idx = idx
+      end
+    end
+    assert.is_truthy(open_idx)
+    assert.is_truthy(body1_idx)
+    assert.is_truthy(body2_idx)
+    assert.is_truthy(close_idx)
+    assert.is_truthy(after_idx)
+    assert.is_true(open_idx < body1_idx)
+    assert.is_true(body1_idx < body2_idx)
+    assert.is_true(body2_idx < close_idx)
+    assert.is_true(close_idx < after_idx)
+  end)
 end)
 
 -- A> runs and the fenced {aside} ... {/aside} form. A bare aside has no
@@ -334,6 +526,78 @@ describe("blocks.transform asides", function()
     local out = run("```markua\nA> not an aside\n```\n")
     assert.is_truthy(out:find("A> not an aside", 1, true))
     assert.is_nil(out:find(":::", 1, true))
+  end)
+
+  -- FIX 5: id: was dropped on both the A> and fenced {aside, id: ...} paths.
+  it("carries a pending list's id: onto an A> run's div", function()
+    local out = run("{id: sidebar}\nA> hi\n")
+    assert.is_truthy(out:find("::: {#sidebar .aside}", 1, true))
+  end)
+
+  it("carries a pending list's id: onto an A> run's div alongside a class", function()
+    local out = run('{class: tip, id: sidebar}\nA> hi\n')
+    assert.is_truthy(out:find("::: {#sidebar .tip .aside}", 1, true))
+  end)
+
+  it("carries an id: through the fenced {aside, id: ...} form", function()
+    local out = run("{aside, class: tip, id: sidebar}\nhi\n{/aside}\n")
+    assert.is_truthy(out:find("::: {#sidebar .tip .aside}", 1, true))
+  end)
+
+  -- FIX 6: pin the body strictly between opener and closer, the way the
+  -- blurb describe block above does for its two forms.
+  it("keeps an A> run's body strictly between its opener and closer", function()
+    local lines = run_lines("{class: tip}\nA> line one\nA> line two\n\nAfter.\n")
+    local open_idx, body1_idx, body2_idx, close_idx, after_idx
+    for idx, line in ipairs(lines) do
+      if line == "::: {.tip .aside}" then
+        open_idx = idx
+      elseif line == "line one" then
+        body1_idx = idx
+      elseif line == "line two" then
+        body2_idx = idx
+      elseif line == ":::" and open_idx and not close_idx then
+        close_idx = idx
+      elseif line == "After." then
+        after_idx = idx
+      end
+    end
+    assert.is_truthy(open_idx)
+    assert.is_truthy(body1_idx)
+    assert.is_truthy(body2_idx)
+    assert.is_truthy(close_idx)
+    assert.is_truthy(after_idx)
+    assert.is_true(open_idx < body1_idx)
+    assert.is_true(body1_idx < body2_idx)
+    assert.is_true(body2_idx < close_idx)
+    assert.is_true(close_idx < after_idx)
+  end)
+
+  it("keeps a fenced {aside} body strictly between its opener and closer", function()
+    local lines = run_lines("{aside, class: tip}\nSide one.\nSide two.\n{/aside}\n\nAfter.\n")
+    local open_idx, body1_idx, body2_idx, close_idx, after_idx
+    for idx, line in ipairs(lines) do
+      if line == "::: {.tip .aside}" then
+        open_idx = idx
+      elseif line == "Side one." then
+        body1_idx = idx
+      elseif line == "Side two." then
+        body2_idx = idx
+      elseif line == ":::" and open_idx and not close_idx then
+        close_idx = idx
+      elseif line == "After." then
+        after_idx = idx
+      end
+    end
+    assert.is_truthy(open_idx)
+    assert.is_truthy(body1_idx)
+    assert.is_truthy(body2_idx)
+    assert.is_truthy(close_idx)
+    assert.is_truthy(after_idx)
+    assert.is_true(open_idx < body1_idx)
+    assert.is_true(body1_idx < body2_idx)
+    assert.is_true(body2_idx < close_idx)
+    assert.is_true(close_idx < after_idx)
   end)
 end)
 

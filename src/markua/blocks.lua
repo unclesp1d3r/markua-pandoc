@@ -130,9 +130,42 @@ local function resolve_callout_class(classes, cfg, file, line)
       break
     end
   end
-  errors.report(cfg, file, line,
-    "unknown callout class '" .. table.concat(classes, "', '") .. "'" .. hint)
+  -- FIX 4: the lenient recovery below adopts the author's own first class as
+  -- the div's head so their text survives -- but open_div runs that head
+  -- through attributes.check_name before emitting, which raises
+  -- UNCONDITIONALLY on a name pandoc's attribute grammar cannot represent
+  -- (e.g. "3bad"). A class that is BOTH unregistered AND unrepresentable
+  -- therefore still aborted under --lenient before this check existed,
+  -- reintroducing the exact strict/lenient asymmetry the comment above
+  -- already fixed once for the plain-unknown-class case. is_valid_name is
+  -- the non-raising sibling of check_name (attributes.lua) that lets this
+  -- function ask the question instead of finding out by crashing.
   local head = classes[1]
+  local representable = head ~= nil and attributes.is_valid_name("class", head)
+  local message = "unknown callout class '" .. table.concat(classes, "', '") .. "'" .. hint
+  if not representable then
+    -- Name both faults in one message: an author staring at "'3bad' unknown"
+    -- alone, after the div silently became .information instead of .3bad,
+    -- would go looking for a registration problem and never find the real
+    -- one -- that the class can't be spelled in pandoc's attribute syntax at
+    -- all, registered or not.
+    message = "unknown and unrepresentable callout class '" .. table.concat(classes, "', '") .. "'" .. hint
+  end
+  errors.report(cfg, file, line, message)
+  if not representable then
+    -- Same shape callout_classes({}, ...) returns for an empty class list:
+    -- no decoratives, since an unrepresentable name cannot ride along as one
+    -- either -- it would hit the identical check_name raise one slot later.
+    --
+    -- Returning nil rather than "information" leaves the fallback class to
+    -- the caller, because the two constructs disagree on what it should be:
+    -- a blurb defaults to `information` (R4), while a bare aside carries no
+    -- callout class at all (R11). Answering "information" here for both gave
+    -- a recovered aside `::: {.information .aside}`, which the callout filter
+    -- then styles as a blurb -- turning a lenient recovery into wrong output
+    -- rather than merely degraded output.
+    return nil, {}
+  end
   local decoratives = {}
   for j = 2, #classes do
     decoratives[#decoratives + 1] = classes[j]
@@ -147,7 +180,14 @@ local function callout_classes(classes, cfg, file, line)
   if #classes == 0 then
     return "information", {}
   end
-  return resolve_callout_class(classes, cfg, file, line)
+  local head, decoratives = resolve_callout_class(classes, cfg, file, line)
+  -- A nil head is the lenient unrepresentable-class recovery declining to
+  -- pick a fallback (see resolve_callout_class). A blurb's is `information`,
+  -- the same default an empty class list takes (R4).
+  if head == nil then
+    return "information", {}
+  end
+  return head, decoratives
 end
 
 -- Bare-word directive -> which self-closing marker family it emits (R14,
@@ -213,16 +253,38 @@ function M.transform(lines, cfg, file)
     out[#out + 1] = s
   end
 
-  -- A body line that is exactly ":::" or "$$" would close a fence this pass
-  -- opened elsewhere in the document, desynchronizing every block after it.
-  -- pandoc's own markdown writer backslash-escapes such a line rather than
-  -- erroring (a ":::" paragraph inside a div is written "\:::" and reads
-  -- back identically), so every non-fence, non-attribute line this pass
-  -- emits goes through here -- not only the blurb and aside bodies this
-  -- module builds, because a plain paragraph elsewhere in the document can
-  -- collide with a delimiter this pass generates just as easily.
+  -- A body line beginning with a run of 3+ colons opens or closes a fenced
+  -- div in pandoc's own grammar REGARDLESS of what follows the colons on
+  -- that line -- verified against the reader's exact TARGET_FORMAT:
+  -- ":::text" (no space, no braces) opens a div named "text" exactly like
+  -- ":::" alone closes whichever one is open. A bare-":::" match alone (FIX
+  -- 2) therefore missed the far more common author shape "::: {.example}":
+  -- that line opened a real NESTED Div this pass never intended, and the
+  -- construct's own generated closer then closed the INNER div instead of
+  -- the one this pass opened, leaving everything after it swallowed into
+  -- the outer div with a "closing implicitly" warning at EOF -- silent
+  -- structural corruption, not merely misplaced text. So every line whose
+  -- content starts with ":::" is escaped here, not only a bare colon run.
+  --
+  -- This does NOT imitate pandoc's own markdown writer: writing a real
+  -- nested Div back out, pandoc WIDENS the outer fence to "::::" rather than
+  -- escaping the inner one (confirmed with `pandoc -f <TARGET_FORMAT> -t
+  -- markdown` against a nested-div AST). Widening is the writer's fix for a
+  -- Div node it already knows is nested; it has no bearing here, because
+  -- this pass is not rendering a Div -- it is passing through a line of an
+  -- author's prose that happens to be ":::"-shaped. The actual reason to
+  -- escape it is narrower and unrelated to that writer behavior: an
+  -- author's literal ":::"-shaped body line must not be able to open or
+  -- close a div this pass generates elsewhere in the same document.
+  --
+  -- "$$" gets the same treatment for the same underlying reason -- it is a
+  -- display-math delimiter this pass emits elsewhere -- but stays bare-only
+  -- (`^%s*%$%$%s*$`, not widened to "anything starting with $$"): unlike
+  -- ":::", pandoc's tex_math_dollars syntax has no attribute-string form
+  -- that turns "$$ something" into a different construct, so there is
+  -- nothing analogous to ":::{.class}" for "$$" to collide with.
   local function emit_body(s)
-    if s:match("^%s*:::+%s*$") or s:match("^%s*%$%$%s*$") then
+    if s:match("^%s*:::+") or s:match("^%s*%$%$%s*$") then
       emit((s:gsub("^(%s*)", "%1\\", 1)))
     else
       emit(s)
@@ -241,9 +303,11 @@ function M.transform(lines, cfg, file)
   -- `id`, when given, leads the attribute block as `#id` -- the shape
   -- `attributes.to_pandoc_attr` already uses, and one the pandoc oracle
   -- confirms sets the Div's identifier identically to a Markua `id:` key
-  -- rendered as `id="..."`. The sugar-prefix branch below is the only caller
-  -- that passes one, carrying a pending list's id onto a sugar-prefix blurb
-  -- (R5a) rather than dropping it.
+  -- rendered as `id="..."`. Every caller of this function threads one
+  -- through: the sugar-prefix branch below, the A> branch and fenced
+  -- {aside} branch via open_aside, and the fenced {blurb} branch directly
+  -- (FIX 5) -- an `id:` on any of the five construct paths reaches its div
+  -- rather than silently losing the cross-reference anchor on three of them.
   --
   -- `head` and every entry of `decoratives`, plus `id` when given, are
   -- validated through attributes.check_name before anything is emitted --
@@ -289,12 +353,30 @@ function M.transform(lines, cfg, file)
   -- callout_classes gives blurbs. A non-empty class list resolves through
   -- the same resolve_callout_class a blurb's does, so a bad class raises
   -- identically in both constructs (KTD7).
-  local function open_aside(classes, line)
+  --
+  -- `id`, when given, is threaded through to open_div in the non-empty-class
+  -- branch, and validated and emitted directly in the bare-`::: {.aside}`
+  -- branch (FIX 5) -- an `id:` above an `A>` run or a fenced `{aside}` no
+  -- longer vanishes the way it did before this function accepted one.
+  local function open_aside(classes, line, id)
     if not classes or #classes == 0 then
-      emit("::: {.aside}")
+      if id then
+        attributes.check_name("id", id, file, line)
+        emit("::: {#" .. id .. " .aside}")
+      else
+        emit("::: {.aside}")
+      end
     else
       local head, decoratives = resolve_callout_class(classes, cfg, file, line)
-      open_div(head, decoratives, "aside", nil, line)
+      if head == nil then
+        -- Lenient recovery declined to pick a fallback class. An aside's is
+        -- no callout class at all (R11), not the blurb's `information`, so
+        -- recover to the same bare shape an aside with no attribute list
+        -- takes -- keeping any id the author did supply.
+        open_aside(nil, line, id)
+      else
+        open_div(head, decoratives, "aside", id, line)
+      end
     end
   end
 
@@ -308,7 +390,17 @@ function M.transform(lines, cfg, file)
     local closer = "^%s*{/" .. marker .. "}%s*$"
     i = i + 1
     while i <= #lines and not (not lines[i].in_code and lines[i].text:match(closer)) do
-      emit_body(lines[i].text)
+      -- FIX 3: a code sample nested inside this fenced form can legitimately
+      -- contain a ":::"-shaped line (AGENTS.md's fence-awareness rule --
+      -- content inside a fenced code block is never Markua). The closer
+      -- check above already branches on `in_code`; emission must match it,
+      -- or a code line reaches emit_body and gets a spurious backslash
+      -- escape injected into what the author wrote verbatim.
+      if lines[i].in_code then
+        emit(lines[i].text)
+      else
+        emit_body(lines[i].text)
+      end
       i = i + 1
     end
     if i > #lines then
@@ -369,6 +461,14 @@ function M.transform(lines, cfg, file)
     local blurb_prefix = find_blurb_prefix(text)
 
     if rec.in_code then
+      -- A pending list does not survive a fence: without this, {class: tip}
+      -- above a fenced code sample silently jumps the fence and binds to
+      -- whatever construct follows it, so a W> after the fence renders as a
+      -- tip -- wrong class, no error, in strict mode (FIX 1). This is the
+      -- only branch in the dispatch that neither consumes `pending` nor
+      -- rejects it; every other non-consuming branch calls reject_pending as
+      -- its first action, per that function's own comment.
+      reject_pending("attribute list precedes a fenced code block")
       emit(text)
       i = i + 1
 
@@ -387,7 +487,14 @@ function M.transform(lines, cfg, file)
         -- for every branch that does not consume the pending list.
         reject_pending("attribute list may not precede a fenced {blurb} opener")
         local head, decoratives = callout_classes(parsed.classes, cfg, file, rec.number)
-        open_div(head, decoratives, "blurb", nil, rec.number)
+        -- FIX 5: `id:` lands in parsed.keyvals.id (attributes.parse's home
+        -- for Markua's own id syntax); parsed.id is only ever set by the
+        -- `#id` shorthand pandoc uses and Markua's fenced-opener syntax does
+        -- not. Checking both, as the sugar-prefix branch below already does,
+        -- means the fenced {blurb, id: s} ... {/blurb} form produces the
+        -- identical div the plan's R3 requires instead of dropping the
+        -- anchor.
+        open_div(head, decoratives, "blurb", parsed.id or parsed.keyvals.id, rec.number)
         consume_until_close("blurb", rec.number)
       elseif #parsed.bare == 1 and parsed.bare[1] == "aside" then
         -- Fenced form: {aside, class: X} ... {/aside}. Sibling of the {blurb}
@@ -396,7 +503,7 @@ function M.transform(lines, cfg, file)
         -- but open_aside (unlike callout_classes) has no default class to
         -- fall back to when parsed.classes is empty (R12).
         reject_pending("attribute list may not precede a fenced {aside} opener")
-        open_aside(parsed.classes, rec.number)
+        open_aside(parsed.classes, rec.number, parsed.id or parsed.keyvals.id)  -- FIX 5
         consume_until_close("aside", rec.number)
       elseif #parsed.bare == 1 and DIRECTIVES[parsed.bare[1]] then
         -- Bare-word directive. A pending list does not bind to a directive
@@ -448,7 +555,7 @@ function M.transform(lines, cfg, file)
       -- exactly as the fenced form does, falling back to the bare
       -- `::: {.aside}` shape when no list precedes the run at all (R11).
       if pending then
-        open_aside(pending.classes, pending.line)
+        open_aside(pending.classes, pending.line, pending.id or pending.keyvals.id)  -- FIX 5
         pending, pending_text = nil, nil
       else
         open_aside({}, rec.number)
