@@ -22,6 +22,21 @@ local function quiet_sink()
   return { write = function() end }
 end
 
+-- A sink that records errors.warn's output instead of swallowing it, for the
+-- one U3 scenario that must observe KTD10a's warning-on-override rather than
+-- merely not crash on it.
+local function capturing_sink()
+  local sink = { writes = {} }
+  sink.write = function(self, ...)
+    local parts = {}
+    for _, v in ipairs({ ... }) do
+      parts[#parts + 1] = tostring(v)
+    end
+    table.insert(self.writes, table.concat(parts))
+  end
+  return sink
+end
+
 local function lenient_cfg()
   return config.merge(config.defaults(), { strict = false, sink = quiet_sink() })
 end
@@ -299,5 +314,83 @@ describe("blocks.transform asides", function()
     local out = run("```markua\nA> not an aside\n```\n")
     assert.is_truthy(out:find("A> not an aside", 1, true))
     assert.is_nil(out:find(":::", 1, true))
+  end)
+end)
+
+-- U3: the eight documented syntactic-sugar blurb prefixes (C/D/E/I/Q/T/W/X>)
+-- open blurbs of their specified class instead of passing through as literal
+-- prose (R5). B> stays U2's no-implied-class case. KTD10a governs precedence
+-- when a pending attribute list disagrees with a prefix's implied class: the
+-- explicit class wins and the conversion still succeeds, with a warning to
+-- the sink so the author learns the two signals disagree (R5a).
+describe("blocks.transform blurb sugar prefixes", function()
+  local prefix_classes = {
+    C = "center",
+    D = "discussion",
+    E = "error",
+    I = "information",
+    Q = "question",
+    T = "tip",
+    W = "warning",
+    X = "exercise",
+  }
+
+  for letter, class in pairs(prefix_classes) do
+    it("opens a " .. class .. " blurb for the " .. letter .. "> prefix", function()
+      local out = run(letter .. "> hi\n")
+      assert.is_truthy(out:find("::: {." .. class .. " .blurb}", 1, true))
+    end)
+  end
+
+  it("collects every line of a multi-line T> run into one div", function()
+    local out = run("T> line one\nT> line two\n")
+    assert.is_truthy(out:find("::: {.tip .blurb}", 1, true))
+    assert.is_truthy(out:find("line one", 1, true))
+    assert.is_truthy(out:find("line two", 1, true))
+    local _, count = out:gsub(":::", "")
+    assert.equals(2, count)  -- exactly one opener and one closer
+  end)
+
+  it("renders C> and {class: center} above a B> run identically", function()
+    local sugar = run("C> hi\n")
+    local spelled_out = run("{class: center}\nB> hi\n")
+    assert.equals(sugar, spelled_out)
+  end)
+
+  it("does not transform a sugar prefix inside a fenced code block", function()
+    local out = run("```markua\nT> not a tip\n```\n")
+    assert.is_truthy(out:find("T> not a tip", 1, true))
+    assert.is_nil(out:find(":::", 1, true))
+  end)
+
+  it("lets an explicit {class: X} above a sugar prefix override its implied class", function()
+    -- The spec's own worked example: {class: tip} above W> renders as a tip
+    -- blurb, not a failed conversion. The warning this also emits (R5a) is
+    -- covered by its own scenario below; quiet it here so it does not spew
+    -- over this run's output.
+    local out = run("{class: tip}\nW> hi\n", config.merge(config.defaults(), { sink = quiet_sink() }))
+    assert.is_truthy(out:find("::: {.tip .blurb}", 1, true))
+  end)
+
+  it("emits a warning when an explicit class overrides a sugar prefix's implied class", function()
+    local sink = capturing_sink()
+    local cfg = config.merge(config.defaults(), { sink = sink })
+    run("{class: tip}\nW> hi\n", cfg)
+    assert.is_true(#sink.writes > 0)
+  end)
+
+  it("adds only the decorative class, with no warning, when the explicit class agrees with the prefix", function()
+    local sink = capturing_sink()
+    local cfg = config.merge(config.defaults(), { sink = sink })
+    local out = run('{class: "tip wide"}\nT> hi\n', cfg)
+    assert.is_truthy(out:find("::: {.tip .wide .blurb}", 1, true))
+    assert.equals(0, #sink.writes)
+  end)
+
+  it("carries an {id: sidebar} pending list's id onto a sugar prefix's div, keeping its class", function()
+    -- A list with no class overrides nothing: `tip` still comes from the
+    -- prefix, but the id rides along.
+    local out = run("{id: sidebar}\nT> hi\n")
+    assert.is_truthy(out:find("::: {#sidebar .tip .blurb}", 1, true))
   end)
 end)

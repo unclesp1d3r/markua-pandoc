@@ -8,10 +8,13 @@
 -- machinery, but a bare aside has no callout-class default the way a bare
 -- blurb defaults to `information` (R4 vs R11), and a pending attribute list
 -- above an `A>` run is applied rather than rejected the way one above a
--- fenced opener is (KTD7). The C/D/E/I/Q/T/W/X> sugar prefixes (U3) and the
--- bare-word directive table (U5) each add a branch to the attribute-line and
--- prefix dispatch below, ahead of the generic "unclaimed attribute list"
--- fallback U1 builds. Those branches don't exist yet: a bare word like
+-- fenced opener is (KTD7). U3 adds the C/D/E/I/Q/T/W/X> sugar prefixes,
+-- table-driven alongside `B>` in one dispatch (KTD10); a pending attribute
+-- list's explicit class overrides a prefix's implied one rather than
+-- conflicting with it, reported as a warning rather than a hard error
+-- (KTD10a). The bare-word directive table (U5) still adds a branch to the
+-- attribute-line dispatch below, ahead of the generic "unclaimed attribute
+-- list" fallback U1 builds. That branch doesn't exist yet: a bare word like
 -- "pagebreak" still falls through to that fallback, exactly like any other
 -- list this pass does not recognize.
 local attributes = require("src.markua.attributes")
@@ -26,6 +29,37 @@ local M = {}
 local function strip_prefix(text, prefix)
   local body = text:sub(#prefix + 1)
   return (body:gsub("^ ", ""))
+end
+
+-- Sugar prefix -> implied callout class (R5). `B` carries no implied class
+-- of its own: it is the general form U2 already covers, falling back to a
+-- pending list's class or, absent one, R4's `information` default. Every
+-- other prefix names the class Markua 0.30 documents for it. Table-driven
+-- rather than a branch chain (KTD10) -- Lua patterns have no alternation,
+-- and scanner.lua and config.lua both already hold their own alternatives as
+-- data, not a chain of `elseif`s.
+local BLURB_PREFIXES = {
+  { prefix = "B>", class = nil },
+  { prefix = "C>", class = "center" },
+  { prefix = "D>", class = "discussion" },
+  { prefix = "E>", class = "error" },
+  { prefix = "I>", class = "information" },
+  { prefix = "Q>", class = "question" },
+  { prefix = "T>", class = "tip" },
+  { prefix = "W>", class = "warning" },
+  { prefix = "X>", class = "exercise" },
+}
+
+-- Which entry (if any) opens `text` as a blurb run. A loop over the table
+-- above, for the same reason the table exists: Lua's patterns cannot
+-- alternate, so this cannot collapse into one combined pattern.
+local function find_blurb_prefix(text)
+  for _, entry in ipairs(BLURB_PREFIXES) do
+    if text:sub(1, #entry.prefix) == entry.prefix then
+      return entry
+    end
+  end
+  return nil
 end
 
 -- Enrich an unknown-class error with the registered spelling when the two
@@ -159,8 +193,19 @@ function M.transform(lines, cfg, file)
   -- author wrote them (R8) -- the reference this pass started from resolved
   -- one callout class and silently dropped every other one, which this
   -- fixes by taking the whole list instead of a single resolved name.
-  local function open_div(head, decoratives, marker)
-    local parts = { "." .. head }
+  --
+  -- `id`, when given, leads the attribute block as `#id` -- the shape
+  -- `attributes.to_pandoc_attr` already uses, and one the pandoc oracle
+  -- confirms sets the Div's identifier identically to a Markua `id:` key
+  -- rendered as `id="..."`. U3 is the first caller to pass one, carrying a
+  -- pending list's id onto a sugar-prefix blurb (R5a) rather than dropping
+  -- it the way the un-widened class-only signature would have.
+  local function open_div(head, decoratives, marker, id)
+    local parts = {}
+    if id then
+      parts[#parts + 1] = "#" .. id
+    end
+    parts[#parts + 1] = "." .. head
     for _, c in ipairs(decoratives) do
       parts[#parts + 1] = "." .. c
     end
@@ -294,17 +339,41 @@ function M.transform(lines, cfg, file)
       end
       emit(":::")
 
-    elseif text:match("^B>") then
-      -- B> run: consumes a pending list if one precedes it (R2), or defaults
-      -- to `information` if not (R4). This swallows every consecutive B>
-      -- line itself, so -- unlike the two branches below -- it advances `i`
-      -- on its own and sits outside their shared trailing increment.
-      local head, decoratives =
-        callout_classes(pending and pending.classes or {}, cfg, file, pending_line or rec.number)
+    elseif find_blurb_prefix(text) then
+      -- B> run and the eight sugar prefixes (U3) share one path (KTD10):
+      -- they differ only in what class an EMPTY pending list resolves to.
+      -- A pending list carrying its own class always wins over the prefix's
+      -- implied one (KTD10a, R5a) -- the spec's own worked example renders
+      -- {class: tip} above W> as a tip blurb, not a failed conversion -- so
+      -- disagreement between the two is a warning, not a hard error, fired
+      -- only when they actually differ. This swallows every consecutive
+      -- line sharing the SAME prefix itself, so -- unlike the branches below
+      -- -- it advances `i` on its own and sits outside their shared trailing
+      -- increment.
+      local entry = find_blurb_prefix(text)
+      local pending_classes = pending and pending.classes or {}
+      -- Markua's own id syntax is the `id:` key (KTD10b), which
+      -- attributes.parse lands in .keyvals.id; `.id` itself is only ever set
+      -- by the `#id` shorthand pandoc uses and Markua does not. Checking
+      -- both costs nothing and means an id reaches the div regardless of
+      -- which shape produced it.
+      local id = pending and (pending.id or pending.keyvals.id) or nil
+      local head, decoratives
+      if #pending_classes > 0 then
+        head, decoratives = callout_classes(pending_classes, cfg, file, pending_line)
+        if entry.class and head ~= entry.class then
+          errors.warn(file, pending_line, string.format(
+            "explicit class '%s' overrides %s's implied class '%s'", head, entry.prefix, entry.class), cfg.sink)
+        end
+      elseif entry.class then
+        head, decoratives = entry.class, {}
+      else
+        head, decoratives = callout_classes({}, cfg, file, rec.number)
+      end
       pending, pending_line, pending_text = nil, nil, nil
-      open_div(head, decoratives, "blurb")
-      while i <= #lines and lines[i].text:match("^B>") do
-        emit_body(strip_prefix(lines[i].text, "B>"))
+      open_div(head, decoratives, "blurb", id)
+      while i <= #lines and lines[i].text:sub(1, #entry.prefix) == entry.prefix do
+        emit_body(strip_prefix(lines[i].text, entry.prefix))
         i = i + 1
       end
       emit(":::")

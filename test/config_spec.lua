@@ -33,6 +33,33 @@ describe("config.defaults", function()
     assert.is_true(config.defaults().strict)
   end)
 
+  -- KTD9: spec.txt:6895-6923 documents C> and {class: center} as a blurb
+  -- class, and the shipped defaults omitted it -- both forms raised before
+  -- U3. Pinned as its own scenario, deliberately, rather than folded
+  -- silently into the exact-set assertion below.
+  it("includes center in the documented class set (KTD9)", function()
+    local cfg = config.defaults()
+    assert.is_true(config.is_callout_class(cfg, "center"))
+  end)
+
+  -- The exact-set pin U3 adds: nine classes, not eight, now that center has
+  -- joined them. Order-independent (table.sort both sides) because
+  -- callout_classes's declaration order is not itself a documented contract.
+  it("ships exactly the documented nine callout classes", function()
+    local cfg = config.defaults()
+    local expected = {
+      "warning", "tip", "note", "information",
+      "error", "question", "discussion", "exercise", "center",
+    }
+    table.sort(expected)
+    local actual = {}
+    for _, c in ipairs(cfg.callout_classes) do
+      actual[#actual + 1] = c
+    end
+    table.sort(actual)
+    assert.same(expected, actual)
+  end)
+
   -- defaults() must build its tables per call. A shared array would let one
   -- book's override leak into the next document converted in the same process.
   it("returns independent tables on each call", function()

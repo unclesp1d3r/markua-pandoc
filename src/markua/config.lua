@@ -20,9 +20,11 @@ function M.defaults()
     -- The documented Markua 0.30 set. Leanpub itself rejects `note` in some
     -- builds and individual books narrow the list further, which is exactly
     -- why this is data a config file can replace rather than a branch.
+    -- `center` (spec.txt:6895-6923, KTD9) is the class the `C>` sugar prefix
+    -- and `{class: center}` both name -- without it here, both forms raise.
     callout_classes = {
       "warning", "tip", "note", "information",
-      "error", "question", "discussion", "exercise",
+      "error", "question", "discussion", "exercise", "center",
     },
     -- `ix` is the spec form; `i` is a widespread real-world variant that real
     -- manuscripts use, so both are recognized.
@@ -35,7 +37,7 @@ end
 --- Combine `overrides` onto `base`, returning a new table.
 --
 -- Shallow by design: `callout_classes = {"tip"}` must narrow the documented
--- eight to exactly `tip`, so a value replaces rather than accumulates.
+-- set to exactly `tip`, so a value replaces rather than accumulates.
 -- Neither argument is mutated -- callers hold onto `defaults()` results and a
 -- merge that wrote through would corrupt them.
 function M.merge(base, overrides)
@@ -174,7 +176,7 @@ end
 
 --- Is `name` one of the configured callout classes?
 --
--- A linear scan over at most eight entries. Building a set would cost more in
+-- A linear scan over a single-digit list. Building a set would cost more in
 -- allocation than it saves in lookups at this size, and unlike `errors.report`
 -- this is not the error path, so it does not defend against a malformed cfg:
 -- validation happens once, at the config-file boundary.
