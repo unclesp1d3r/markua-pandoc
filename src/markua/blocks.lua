@@ -12,11 +12,11 @@
 -- table-driven alongside `B>` in one dispatch (KTD10); a pending attribute
 -- list's explicit class overrides a prefix's implied one rather than
 -- conflicting with it, reported as a warning rather than a hard error
--- (KTD10a). The bare-word directive table (U5) still adds a branch to the
--- attribute-line dispatch below, ahead of the generic "unclaimed attribute
--- list" fallback U1 builds. That branch doesn't exist yet: a bare word like
--- "pagebreak" still falls through to that fallback, exactly like any other
--- list this pass does not recognize.
+-- (KTD10a). U5 adds the closed bare-word directive table (`DIRECTIVES`
+-- below): every recognized bare word lowers to a self-closing marker, ahead
+-- of the generic "unclaimed attribute list" fallback U1 builds -- a bare word
+-- outside that table, e.g. "nonsense", still falls through to that fallback
+-- and is rejected exactly as any other unrecognized list is.
 local attributes = require("src.markua.attributes")
 local config = require("src.markua.config")
 local errors = require("src.markua.errors")
@@ -133,6 +133,41 @@ local function callout_classes(classes, cfg, file, line)
   end
   return resolve_callout_class(classes, cfg, file, line)
 end
+
+-- Bare-word directive -> which self-closing marker family it emits (R14,
+-- R15). One table, not two, so the whole recognized set is enumerable in one
+-- place -- that is what makes R19's hard error trustworthy: a caller can see
+-- every legal bare word by reading this table rather than reconciling two.
+--
+-- `frontmatter` is listed under "matter" even though spec.txt:2288 says the
+-- directive "does not exist" and a Processor "should ignore it if it is
+-- encountered": real manuscripts write it anyway, and the spec's own remedy
+-- is to ignore rather than reject. Emitting an inert marker *is* ignoring it
+-- while preserving the author's intent for a downstream filter (KTD5).
+--
+-- `pagebreak` is listed under "insert" rather than getting a marker family of
+-- its own: spec.txt:2219 groups it with neither the structural pair nor the
+-- two closed insertion lists, but it inserts something at a point, which is
+-- what `.insert` already means, and a third family with one member buys
+-- nothing (KTD4).
+local DIRECTIVES = {
+  mainmatter = "matter",
+  backmatter = "matter",
+  frontmatter = "matter",
+  pagebreak = "insert",
+  ["half-title"] = "insert",
+  ["series-title"] = "insert",
+  ["title-page"] = "insert",
+  copyright = "insert",
+  dedication = "insert",
+  epigraph = "insert",
+  toc = "insert",
+  figures = "insert",
+  tables = "insert",
+  index = "insert",
+  ["exercise-answers"] = "insert",
+  ["quiz-answers"] = "insert",
+}
 
 -- An attribute list holding only index keys belongs to inline.transform,
 -- which runs after this pass. Re-emit it untouched rather than treating it
@@ -311,12 +346,45 @@ function M.transform(lines, cfg, file)
         reject_pending("attribute list may not precede a fenced {aside} opener")
         open_aside(parsed.classes, rec.number)
         consume_until_close("aside", rec.number)
+      elseif #parsed.bare == 1 and DIRECTIVES[parsed.bare[1]] then
+        -- Bare-word directive (U5). A pending list does not bind to a
+        -- directive line -- mirroring the fenced {blurb}/{aside} prohibition
+        -- (R13a) -- so it is rejected first, exactly like every other branch
+        -- that does not consume the pending list itself; a leftover
+        -- {class: X} above {pagebreak} raises instead of silently vanishing.
+        reject_pending("attribute list does not precede a directive")
+        local word = parsed.bare[1]
+        local kind = DIRECTIVES[word]
+        -- The class and the attribute key are both the kind; the value is
+        -- the bare word verbatim, so no name is translated anywhere (R18).
+        -- Self-closing, not a wrapper (R16, R17): confirmed against the
+        -- reader's own TARGET_FORMAT that prose following the marker is a
+        -- SIBLING Para, not nested inside an empty Div (KTD3).
+        emit(string.format('::: {.%s %s="%s"}', kind, kind, word))
+        emit(":::")
+        i = i + 1
+      elseif #parsed.bare == 1 then
+        -- A lone bare word that reached here is not `blurb`, not `aside`,
+        -- and not in DIRECTIVES, so it is an unrecognized directive and
+        -- nothing downstream will claim it (R19). Say that, rather than
+        -- letting it fall through to the generic swap below: that path
+        -- reports "attribute list precedes no element it can apply to",
+        -- which misdescribes a typo like {indx} as a placement problem and
+        -- sends the author looking at the wrong line. Naming the word and
+        -- the real fault is the entire value of the hard error -- a
+        -- misdiagnosing abort is barely better than the silent
+        -- pass-through AGENTS.md forbids. Reported, not raised, so
+        -- `--lenient` still downgrades it like every other unknown
+        -- construct.
+        reject_pending()
+        errors.report(cfg, file, rec.number,
+          "unrecognized directive '" .. parsed.bare[1] .. "'")
+        emit(text)                     -- lenient only; preserve the author's line
+        i = i + 1
       else
-        -- U5 inserts a branch here for the full directive table. Until it
-        -- lands, every other attribute list -- including a bare-word
-        -- directive line -- falls through to this generic swap, which is
-        -- what keeps it from silently binding to whatever line happens to
-        -- follow it.
+        -- Every other attribute list falls through to this generic swap,
+        -- which is what keeps it from silently binding to whatever line
+        -- happens to follow it (R21).
         reject_pending()               -- a new list may not shadow an unused one
         pending, pending_line, pending_text = parsed, rec.number, text
         i = i + 1

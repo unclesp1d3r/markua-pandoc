@@ -117,24 +117,23 @@ describe("blocks.transform", function()
     assert.is_true(pending_index < paragraph_index)
   end)
 
-  it("places a rejected attribute list before the directive line that follows it, under --lenient", function()
-    -- {pagebreak} is not yet a recognized directive in U1 (U5 adds the
-    -- table), so it falls through the same unclaimed-attribute-list path as
-    -- {class: tip} and is itself re-emitted verbatim in turn. What this
-    -- pins down is ORDER: the pending list must not be re-emitted after the
-    -- directive line that disqualified it.
+  it("places a rejected attribute list before the directive marker that follows it, under --lenient", function()
+    -- {pagebreak} is a recognized directive as of U5, so it no longer falls
+    -- through the unclaimed-attribute-list path itself -- it opens its own
+    -- self-closing marker. What this still pins down is ORDER: the pending
+    -- {class: tip} list must be re-emitted BEFORE that marker, not after it.
     local lines = run_lines("{class: tip}\n{pagebreak}\n", lenient_cfg())
-    local tip_index, pagebreak_index
+    local tip_index, marker_index
     for idx, line in ipairs(lines) do
       if line == "{class: tip}" then
         tip_index = idx
-      elseif line == "{pagebreak}" then
-        pagebreak_index = idx
+      elseif line:find('insert="pagebreak"', 1, true) then
+        marker_index = idx
       end
     end
     assert.is_truthy(tip_index)
-    assert.is_truthy(pagebreak_index)
-    assert.is_true(tip_index < pagebreak_index)
+    assert.is_truthy(marker_index)
+    assert.is_true(tip_index < marker_index)
   end)
 
   it("raises in strict mode when an attribute list precedes a directive line", function()
@@ -392,5 +391,100 @@ describe("blocks.transform blurb sugar prefixes", function()
     -- prefix, but the id rides along.
     local out = run("{id: sidebar}\nT> hi\n")
     assert.is_truthy(out:find("::: {#sidebar .tip .blurb}", 1, true))
+  end)
+end)
+
+-- U5: the closed set of fifteen Markua 0.30 bare-word directives, each
+-- lowering to a self-closing marker rather than a wrapping pair (R16, R17).
+-- `frontmatter` rides the `.matter` family alongside `mainmatter` and
+-- `backmatter` even though the spec says the directive "does not exist"
+-- (KTD5); `pagebreak` rides `.insert` alongside the front- and back-matter
+-- insertion directives (KTD4). A bare word outside this table still exercises
+-- U1's generic unclaimed-attribute-list fallback and raises, naming the word.
+describe("blocks.transform directives", function()
+  it("emits ::: {.matter matter=\"frontmatter\"} for {frontmatter}, word verbatim", function()
+    local out = run("{frontmatter}\n")
+    assert.is_truthy(out:find('::: {.matter matter="frontmatter"}', 1, true))
+    assert.is_truthy(out:find(":::\n", 1, true) or out:find(":::$"))
+  end)
+
+  it("emits the matter marker for {mainmatter}", function()
+    local out = run("{mainmatter}\n")
+    assert.is_truthy(out:find('::: {.matter matter="mainmatter"}', 1, true))
+  end)
+
+  it("emits the matter marker for {backmatter}", function()
+    local out = run("{backmatter}\n")
+    assert.is_truthy(out:find('::: {.matter matter="backmatter"}', 1, true))
+  end)
+
+  it("emits ::: {.insert insert=\"index\"} for {index}", function()
+    local out = run("{index}\n")
+    assert.is_truthy(out:find('::: {.insert insert="index"}', 1, true))
+  end)
+
+  local insertion_words = {
+    "half-title", "series-title", "title-page", "copyright", "dedication",
+    "epigraph", "toc", "figures", "tables", "exercise-answers",
+    "quiz-answers", "pagebreak",
+  }
+  for _, word in ipairs(insertion_words) do
+    it("emits its own .insert marker for {" .. word .. "}, word verbatim", function()
+      local out = run("{" .. word .. "}\n")
+      assert.is_truthy(out:find('::: {.insert insert="' .. word .. '"}', 1, true))
+    end)
+  end
+
+  it("emits a self-closing marker, not a wrapper: prose after {index} lands outside the div", function()
+    local lines = run_lines("{index}\n\nProse here.\n")
+    local open_idx, close_idx, prose_idx
+    for idx, line in ipairs(lines) do
+      if line == '::: {.insert insert="index"}' then
+        open_idx = idx
+      elseif line == ":::" and open_idx and not close_idx then
+        close_idx = idx
+      elseif line == "Prose here." then
+        prose_idx = idx
+      end
+    end
+    assert.is_truthy(open_idx)
+    assert.is_truthy(close_idx)
+    assert.is_truthy(prose_idx)
+    -- The closer immediately follows the opener -- nothing is nested inside.
+    assert.equals(open_idx + 1, close_idx)
+    assert.is_true(prose_idx > close_idx)
+  end)
+
+  it("raises on an unrecognized bare word, naming the offender and the real fault", function()
+    local ok, err = pcall(run, "{nonsense}\n")
+    assert.is_false(ok)
+    local msg = tostring(err)
+    assert.is_truthy(msg:find("nonsense", 1, true))
+    -- Naming the fault matters as much as naming the word. Reported through
+    -- the generic unclaimed-list path this read "attribute list precedes no
+    -- element it can apply to", which sends an author who typed {indx} to
+    -- look at the placement of a line that is merely misspelled.
+    assert.is_truthy(msg:find("unrecognized directive", 1, true))
+  end)
+
+  it("downgrades an unrecognized bare word under --lenient, preserving the line", function()
+    local out = table.concat(blocks.transform(
+      scanner.scan("{nonsense}\n"), lenient_cfg(), "f.md"), "\n")
+    assert.is_truthy(out:find("{nonsense}", 1, true))
+    assert.is_nil(out:find(":::", 1, true))
+  end)
+
+  it("does not transform a directive line inside a fenced code block", function()
+    local out = run("```markua\n{index}\n```\n")
+    assert.is_truthy(out:find("{index}", 1, true))
+    assert.is_nil(out:find(":::", 1, true))
+  end)
+
+  it("recognizes {quiz-answers} without colliding with a future rejection of {quiz}", function()
+    -- Exact-word lookup, not prefix: DIRECTIVES has no "quiz" entry, only
+    -- "quiz-answers", so Task 8's eventual {quiz} rejection cannot be
+    -- short-circuited by this table.
+    local out = run("{quiz-answers}\n")
+    assert.is_truthy(out:find('::: {.insert insert="quiz-answers"}', 1, true))
   end)
 end)
