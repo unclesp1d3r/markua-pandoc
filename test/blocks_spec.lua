@@ -4,14 +4,14 @@
 -- `busted test/blocks_spec.lua` from the repo root -- require("src.markua.blocks")
 -- resolves through .busted's lpath only from there.
 --
--- U1 ships only the pass skeleton and the pending attribute-list lifecycle:
--- fence passthrough, the {class: part} heading attach, the index-only
--- passthrough, and every path an unclaimed attribute list can take out of
--- the pending state. Blurbs (U2), the sugar prefixes (U3), asides (U4), and
--- the bare-word directive table (U5) all add branches ahead of this unit's
--- generic "unclaimed attribute list" fallback, so a bare word this pass does
--- not yet recognize -- {pagebreak}, {blurb}, {frontmatter} -- exercises that
--- fallback here rather than the marker each later unit gives it.
+-- The first describe block below covers the pass skeleton and the pending
+-- attribute-list lifecycle: fence passthrough, the {class: part} heading
+-- attach, the index-only passthrough, and every path an unclaimed attribute
+-- list can take out of the pending state. Blurbs, the sugar prefixes, asides,
+-- and the bare-word directive table each have their own describe block below
+-- this one; a bare word none of THEM recognizes -- {nonsense}, covered under
+-- directives -- is what exercises this pass's generic "unclaimed attribute
+-- list" fallback instead of a construct-specific marker.
 local scanner = require("src.markua.scanner")
 local config = require("src.markua.config")
 local blocks = require("src.markua.blocks")
@@ -23,7 +23,7 @@ local function quiet_sink()
 end
 
 -- A sink that records errors.warn's output instead of swallowing it, for the
--- one U3 scenario that must observe KTD10a's warning-on-override rather than
+-- scenario that must observe KTD10a's warning-on-override rather than
 -- merely not crash on it.
 local function capturing_sink()
   local sink = { writes = {} }
@@ -78,9 +78,10 @@ describe("blocks.transform", function()
   end)
 
   it("rejects an attribute list separated from a B> run by a blank line", function()
-    -- B> is not yet a recognized construct in U1, but the attribute list
-    -- must still fail to bind across the blank rather than surviving to
-    -- (wrongly) attach to it once a later unit adds the B> branch.
+    -- A blank line disqualifies a pending attribute list before it reaches
+    -- the B> branch below (KTD6) -- the rejection must fire on the blank
+    -- itself, not survive across it to (wrongly) attach to the run that
+    -- follows.
     local ok = pcall(run, "{class: tip}\n\nB> hi\n")
     assert.is_false(ok)
   end)
@@ -118,10 +119,10 @@ describe("blocks.transform", function()
   end)
 
   it("places a rejected attribute list before the directive marker that follows it, under --lenient", function()
-    -- {pagebreak} is a recognized directive as of U5, so it no longer falls
-    -- through the unclaimed-attribute-list path itself -- it opens its own
-    -- self-closing marker. What this still pins down is ORDER: the pending
-    -- {class: tip} list must be re-emitted BEFORE that marker, not after it.
+    -- {pagebreak} is a recognized directive, so it does not fall through the
+    -- unclaimed-attribute-list path itself -- it opens its own self-closing
+    -- marker. What this pins down is ORDER: the pending {class: tip} list
+    -- must be re-emitted BEFORE that marker, not after it.
     local lines = run_lines("{class: tip}\n{pagebreak}\n", lenient_cfg())
     local tip_index, marker_index
     for idx, line in ipairs(lines) do
@@ -143,10 +144,10 @@ describe("blocks.transform", function()
   end)
 
   it("raises in strict mode when an attribute list precedes a fenced {blurb} opener", function()
-    -- Per R13a, a preceding list is illegal above a fenced opener even once
-    -- U2 gives {blurb} its own branch; here it is unconsumed for a simpler
-    -- reason -- U1 does not recognize it at all yet -- but the outcome the
-    -- author sees, a hard error, must already be correct.
+    -- Per R13a, a preceding list is illegal above a fenced {blurb} opener --
+    -- the {blurb} branch rejects it before opening the div, so the hard
+    -- error the author sees comes from that branch, not the generic
+    -- unclaimed-attribute-list fallback.
     local ok = pcall(run, "{class: tip}\n{blurb, class: warning}\n")
     assert.is_false(ok)
   end)
@@ -162,7 +163,7 @@ describe("blocks.transform", function()
   end)
 end)
 
--- U2: B> runs and the fenced {blurb} ... {/blurb} form, both syntaxes
+-- B> runs and the fenced {blurb} ... {/blurb} form, both syntaxes
 -- producing the identical div per R3.
 describe("blocks.transform blurbs", function()
   it("converts {class: tip} above a B> run into a fenced div", function()
@@ -253,9 +254,29 @@ describe("blocks.transform blurbs", function()
     assert.is_truthy(out:find("::: {.tip .blurb}", 1, true))
     assert.is_truthy(out:find("::: {.information .blurb}", 1, true))
   end)
+
+  it("rejects a decorative class pandoc's attribute syntax cannot represent, naming it", function()
+    -- attributes.check_name rejects a class starting with a digit
+    -- (CLASS_PATTERN requires a leading letter). Without this check, open_div
+    -- would emit "::: {.tip .3bad .blurb}" verbatim, and pandoc rejects the
+    -- WHOLE attribute block on the illegal class -- destroying the blurb and
+    -- leaking literal braces into the finished book.
+    local ok, err = pcall(run, '{class: "tip 3bad"}\nB> hi\n')
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("3bad", 1, true))
+  end)
+
+  it("rejects an id pandoc's attribute syntax cannot represent, naming it", function()
+    -- ID_PATTERN has no allowance for whitespace, so a pending list's
+    -- id: carrying a space must be rejected the same way an invalid class
+    -- is, before it reaches the div's attribute block.
+    local ok, err = pcall(run, '{id: "bad id"}\nT> hi\n')
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("bad id", 1, true))
+  end)
 end)
 
--- U4: A> runs and the fenced {aside} ... {/aside} form. A bare aside has no
+-- A> runs and the fenced {aside} ... {/aside} form. A bare aside has no
 -- callout-class default (unlike a blurb's `information`, R4); a pending
 -- attribute list above an A> run is APPLIED, not dropped (KTD7), while one
 -- above a fenced opener raises (R13a), mirroring the blurb prohibition.
@@ -316,9 +337,9 @@ describe("blocks.transform asides", function()
   end)
 end)
 
--- U3: the eight documented syntactic-sugar blurb prefixes (C/D/E/I/Q/T/W/X>)
+-- The eight documented syntactic-sugar blurb prefixes (C/D/E/I/Q/T/W/X>)
 -- open blurbs of their specified class instead of passing through as literal
--- prose (R5). B> stays U2's no-implied-class case. KTD10a governs precedence
+-- prose (R5). B> stays the no-implied-class case. KTD10a governs precedence
 -- when a pending attribute list disagrees with a prefix's implied class: the
 -- explicit class wins and the conversion still succeeds, with a warning to
 -- the sink so the author learns the two signals disagree (R5a).
@@ -394,13 +415,13 @@ describe("blocks.transform blurb sugar prefixes", function()
   end)
 end)
 
--- U5: the closed set of fifteen Markua 0.30 bare-word directives, each
+-- The closed set of fifteen Markua 0.30 bare-word directives, each
 -- lowering to a self-closing marker rather than a wrapping pair (R16, R17).
 -- `frontmatter` rides the `.matter` family alongside `mainmatter` and
 -- `backmatter` even though the spec says the directive "does not exist"
 -- (KTD5); `pagebreak` rides `.insert` alongside the front- and back-matter
 -- insertion directives (KTD4). A bare word outside this table still exercises
--- U1's generic unclaimed-attribute-list fallback and raises, naming the word.
+-- the generic unclaimed-attribute-list fallback and raises, naming the word.
 describe("blocks.transform directives", function()
   it("emits ::: {.matter matter=\"frontmatter\"} for {frontmatter}, word verbatim", function()
     local out = run("{frontmatter}\n")

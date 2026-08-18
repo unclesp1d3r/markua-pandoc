@@ -233,7 +233,13 @@ end
 local ID_PATTERN = "^[%w%-_:.\128-\255]+$"
 local CLASS_PATTERN = "^[%a\128-\255][%w%-_:.\128-\255]*$"
 
-local function check_name(kind, name, file, line)
+--- Validate that `name` (an id or a class, per `kind`) can be represented in
+--- a pandoc attribute block, raising unconditionally otherwise. Shared by
+--- `to_pandoc_attr` below and by any other module that emits an id or class
+--- pandoc did not itself derive -- blocks.lua's `open_div` is the other
+--- caller, validating a Markua `id:`/`class:` value before it reaches the
+--- literal `::: {...}` text this reader hands to pandoc.read.
+function M.check_name(kind, name, file, line)
   local pattern = kind == "class" and CLASS_PATTERN or ID_PATTERN
   if not name:match(pattern) then
     errors.raise(file, line, string.format("%s %q cannot be represented in a pandoc attribute", kind, name))
@@ -250,11 +256,11 @@ function M.to_pandoc_attr(parsed, file, line)
   line = line or parsed.line
   local parts = {}
   if parsed.id then
-    check_name("id", parsed.id, file, line)
+    M.check_name("id", parsed.id, file, line)
     parts[#parts + 1] = "#" .. parsed.id
   end
   for _, c in ipairs(parsed.classes) do
-    check_name("class", c, file, line)
+    M.check_name("class", c, file, line)
     parts[#parts + 1] = "." .. c
   end
   -- Sorted keys are the determinism mechanism for R18: iterating pairs()

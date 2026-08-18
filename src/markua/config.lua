@@ -189,4 +189,19 @@ function M.is_callout_class(cfg, name)
   return false
 end
 
+--- Is `key` one of the configured index keys (`ix`, `i`, and whatever a book
+--- adds)?
+--
+-- Same linear scan as `is_callout_class` above, against `cfg.index_keys`
+-- instead of `cfg.callout_classes` -- both lists are single digits long, so a
+-- set would cost more in allocation than it saves in lookups here.
+function M.is_index_key(cfg, key)
+  for _, k in ipairs(cfg.index_keys) do
+    if k == key then
+      return true
+    end
+  end
+  return false
+end
+
 return M

@@ -1,22 +1,37 @@
 --- Block-level Markua to pandoc-markdown rewrites.
 --
--- U1 shipped the pass skeleton: fence passthrough, and the pending
--- attribute-list lifecycle every later block construct binds into. U2 adds
--- `B>` runs and the fenced `{blurb}` … `{/blurb}` form, both producing the
--- same callout div. U4 adds `A>` runs and the fenced `{aside}` … `{/aside}`
--- form -- sharing U2's consume-until-close loop and class-resolution
--- machinery, but a bare aside has no callout-class default the way a bare
--- blurb defaults to `information` (R4 vs R11), and a pending attribute list
--- above an `A>` run is applied rather than rejected the way one above a
--- fenced opener is (KTD7). U3 adds the C/D/E/I/Q/T/W/X> sugar prefixes,
--- table-driven alongside `B>` in one dispatch (KTD10); a pending attribute
--- list's explicit class overrides a prefix's implied one rather than
--- conflicting with it, reported as a warning rather than a hard error
--- (KTD10a). U5 adds the closed bare-word directive table (`DIRECTIVES`
--- below): every recognized bare word lowers to a self-closing marker, ahead
--- of the generic "unclaimed attribute list" fallback U1 builds -- a bare word
--- outside that table, e.g. "nonsense", still falls through to that fallback
--- and is rejected exactly as any other unrecognized list is.
+-- Handles the block-level constructs Markua layers on top of CommonMark: the
+-- pending attribute-list lifecycle every construct below binds into, blurbs
+-- and asides (each with a run-of-lines form and a fenced form), the eight
+-- documented blurb sugar prefixes, and the closed set of bare-word matter and
+-- insertion directives.
+--
+-- Blurbs (`B>` runs and `{blurb, class: X} ... {/blurb}`) and asides (`A>`
+-- runs and `{aside} ... {/aside}`) share their consume-until-close loop and
+-- class-resolution machinery, but differ in two ways. A bare blurb defaults
+-- to callout class `information` (R4); a bare aside has no callout-class
+-- default at all (R11) and stays a plain `::: {.aside}`. And a pending
+-- attribute list ahead of an `A>` run is APPLIED, while one ahead of a fenced
+-- `{aside}` opener is REJECTED -- mirroring the fenced `{blurb}` prohibition
+-- (KTD7).
+--
+-- The eight documented sugar prefixes (C/D/E/I/Q/T/W/X>) share one dispatch
+-- with `B>` itself, table-driven (KTD10) since Lua patterns have no
+-- alternation. A pending attribute list's explicit class overrides a
+-- prefix's implied one rather than conflicting with it, reported as a
+-- warning rather than a hard error when the two disagree (KTD10a).
+--
+-- Bare-word directives (the `DIRECTIVES` table below) each lower to a
+-- self-closing marker, ahead of the generic "unclaimed attribute list"
+-- fallback this pass uses last -- a bare word outside that table, e.g.
+-- "nonsense", falls through to that fallback and is rejected exactly as any
+-- other unrecognized list is. `frontmatter` rides the `matter` family even
+-- though the spec calls the directive nonexistent and asks a Processor to
+-- ignore it (KTD5) -- emitting an inert marker *is* ignoring it while
+-- preserving the author's intent for a downstream filter. `pagebreak` rides
+-- `insert` alongside the front-/back-matter insertion directives rather than
+-- getting a marker family of its own, since a third family with one member
+-- buys nothing (KTD4).
 local attributes = require("src.markua.attributes")
 local config = require("src.markua.config")
 local errors = require("src.markua.errors")
@@ -24,20 +39,21 @@ local errors = require("src.markua.errors")
 local M = {}
 
 -- Strip a construct's line prefix and the one space Markua allows after it
--- ("B> text" and "B>text" both mean the same body). Shared by B> now and
--- every sugar prefix U3 adds, so the one-space rule lives in one place.
+-- ("B> text" and "B>text" both mean the same body). Shared by every prefixed
+-- construct (B>, A>, and the eight sugar prefixes), so the one-space rule
+-- lives in one place.
 local function strip_prefix(text, prefix)
   local body = text:sub(#prefix + 1)
   return (body:gsub("^ ", ""))
 end
 
--- Sugar prefix -> implied callout class (R5). `B` carries no implied class
--- of its own: it is the general form U2 already covers, falling back to a
--- pending list's class or, absent one, R4's `information` default. Every
--- other prefix names the class Markua 0.30 documents for it. Table-driven
--- rather than a branch chain (KTD10) -- Lua patterns have no alternation,
--- and scanner.lua and config.lua both already hold their own alternatives as
--- data, not a chain of `elseif`s.
+-- Sugar prefix -> implied callout class (R5). `B` carries no implied class of
+-- its own: it is the general blurb form, falling back to a pending list's
+-- class or, absent one, R4's `information` default. Every other prefix names
+-- the class Markua 0.30 documents for it. Table-driven rather than a branch
+-- chain (KTD10) -- Lua patterns have no alternation, and scanner.lua and
+-- config.lua both already hold their own alternatives as data, not a chain of
+-- `elseif`s.
 local BLURB_PREFIXES = {
   { prefix = "B>", class = nil },
   { prefix = "C>", class = "center" },
@@ -179,13 +195,7 @@ local function is_index_only(parsed, cfg)
   end
   local count = 0
   for key in pairs(parsed.keyvals) do
-    local known = false
-    for _, index_key in ipairs(cfg.index_keys) do
-      if key == index_key then
-        known = true
-      end
-    end
-    if not known then
+    if not config.is_index_key(cfg, key) then
       return false
     end
     count = count + 1
@@ -196,7 +206,6 @@ end
 function M.transform(lines, cfg, file)
   local out = {}
   local pending = nil        -- attribute list awaiting its element
-  local pending_line = nil
   local pending_text = nil   -- the raw line, for verbatim re-emission
   local i = 1
 
@@ -209,9 +218,9 @@ function M.transform(lines, cfg, file)
   -- pandoc's own markdown writer backslash-escapes such a line rather than
   -- erroring (a ":::" paragraph inside a div is written "\:::" and reads
   -- back identically), so every non-fence, non-attribute line this pass
-  -- emits goes through here -- not only the callout bodies U2 and U4 add,
-  -- because a plain paragraph elsewhere in the document can collide with a
-  -- delimiter this pass generates just as easily.
+  -- emits goes through here -- not only the blurb and aside bodies this
+  -- module builds, because a plain paragraph elsewhere in the document can
+  -- collide with a delimiter this pass generates just as easily.
   local function emit_body(s)
     if s:match("^%s*:::+%s*$") or s:match("^%s*%$%$%s*$") then
       emit((s:gsub("^(%s*)", "%1\\", 1)))
@@ -232,10 +241,35 @@ function M.transform(lines, cfg, file)
   -- `id`, when given, leads the attribute block as `#id` -- the shape
   -- `attributes.to_pandoc_attr` already uses, and one the pandoc oracle
   -- confirms sets the Div's identifier identically to a Markua `id:` key
-  -- rendered as `id="..."`. U3 is the first caller to pass one, carrying a
-  -- pending list's id onto a sugar-prefix blurb (R5a) rather than dropping
-  -- it the way the un-widened class-only signature would have.
-  local function open_div(head, decoratives, marker, id)
+  -- rendered as `id="..."`. The sugar-prefix branch below is the only caller
+  -- that passes one, carrying a pending list's id onto a sugar-prefix blurb
+  -- (R5a) rather than dropping it.
+  --
+  -- `head` and every entry of `decoratives`, plus `id` when given, are
+  -- validated through attributes.check_name before anything is emitted --
+  -- the same check attributes.to_pandoc_attr already applies to every id and
+  -- class it renders. This path builds its own `::: {...}` text directly
+  -- rather than going through to_pandoc_attr, so it must call that
+  -- validation itself: without it, an author's `{class: "tip 3bad"}` reaches
+  -- pandoc.read as `::: {.tip .3bad .blurb}`, and pandoc rejects the WHOLE
+  -- attribute block on the illegal class, destroying the blurb and leaking
+  -- literal braces into the finished book -- exactly the failure AGENTS.md's
+  -- "never pass through as literal braces" rule forbids. check_name raises
+  -- unconditionally rather than going through errors.report, matching its
+  -- own behavior inside to_pandoc_attr: an id or class pandoc's attribute
+  -- syntax cannot represent is a "cannot be rendered" fault, not an
+  -- "unrecognized Markua construct" one that --lenient is meant to downgrade.
+  --
+  -- `marker` is never validated: it is always one of this module's own
+  -- literals ("blurb" / "aside"), never author input.
+  local function open_div(head, decoratives, marker, id, line)
+    if id then
+      attributes.check_name("id", id, file, line)
+    end
+    attributes.check_name("class", head, file, line)
+    for _, c in ipairs(decoratives) do
+      attributes.check_name("class", c, file, line)
+    end
     local parts = {}
     if id then
       parts[#parts + 1] = "#" .. id
@@ -260,7 +294,7 @@ function M.transform(lines, cfg, file)
       emit("::: {.aside}")
     else
       local head, decoratives = resolve_callout_class(classes, cfg, file, line)
-      open_div(head, decoratives, "aside")
+      open_div(head, decoratives, "aside", nil, line)
     end
   end
 
@@ -287,19 +321,36 @@ function M.transform(lines, cfg, file)
     i = i + 1
   end
 
+  -- Consume every consecutive line sharing `prefix`, emitting each one's body
+  -- through emit_body, then close with ":::". Shared by the A> branch and the
+  -- blurb-prefix branch below -- both open their div first, then hand off
+  -- here to swallow their own run and close it. "A>" is a fixed literal, so
+  -- `text:match("^A>")` (the run's opening condition) and the `sub`-based
+  -- comparison this loop uses are equivalent for it; using `sub` uniformly
+  -- means one implementation serves every prefix, fixed or table-driven
+  -- alike. Advances `i` on its own, past every line it consumes, exactly
+  -- like consume_until_close above.
+  local function consume_prefixed_run(prefix)
+    while i <= #lines and lines[i].text:sub(1, #prefix) == prefix do
+      emit_body(strip_prefix(lines[i].text, prefix))
+      i = i + 1
+    end
+    emit(":::")
+  end
+
   -- Nothing may see a pending attribute list and quietly forget it. Every
   -- exit from the pending state goes through here, so an unclaimed list
   -- aborts with its own line number instead of leaking braces into the book
   -- or vanishing (R21). Called as the FIRST action of any branch that does
   -- not consume the pending list itself -- the branches that do consume it
-  -- (headings, B> runs, and A> runs here, plus the sugar prefixes once U3
-  -- adds them) are untouched by this rule.
+  -- (the heading attach, and the B>, A>, and sugar-prefix branches) are
+  -- untouched by this rule.
   local function reject_pending(reason)
     if not pending then
       return
     end
     local text = pending_text
-    errors.report(cfg, file, pending_line,
+    errors.report(cfg, file, pending.line,
       (reason or "attribute list applies to nothing") .. ": " .. text)
     -- Only reached when cfg.strict is false. Re-emit verbatim, at the
     -- position of the line that disqualified it: leniency preserves the
@@ -309,12 +360,13 @@ function M.transform(lines, cfg, file)
     -- without bookkeeping: the append lands here, before whatever that line
     -- goes on to emit.
     emit(text)
-    pending, pending_line, pending_text = nil, nil, nil
+    pending, pending_text = nil, nil
   end
 
   while i <= #lines do
     local rec = lines[i]
     local text = rec.text
+    local blurb_prefix = find_blurb_prefix(text)
 
     if rec.in_code then
       emit(text)
@@ -331,11 +383,11 @@ function M.transform(lines, cfg, file)
         -- Fenced form: {blurb, class: X} ... {/blurb}. A pending list on the
         -- line above this opener is illegal per R13a (spec.txt:6647-6656),
         -- so it is rejected first, before anything of this branch's own is
-        -- emitted -- exactly the rule U1's comment on reject_pending
-        -- describes for every branch that does not consume the pending list.
+        -- emitted -- exactly the rule reject_pending's own comment describes
+        -- for every branch that does not consume the pending list.
         reject_pending("attribute list may not precede a fenced {blurb} opener")
         local head, decoratives = callout_classes(parsed.classes, cfg, file, rec.number)
-        open_div(head, decoratives, "blurb")
+        open_div(head, decoratives, "blurb", nil, rec.number)
         consume_until_close("blurb", rec.number)
       elseif #parsed.bare == 1 and parsed.bare[1] == "aside" then
         -- Fenced form: {aside, class: X} ... {/aside}. Sibling of the {blurb}
@@ -347,11 +399,11 @@ function M.transform(lines, cfg, file)
         open_aside(parsed.classes, rec.number)
         consume_until_close("aside", rec.number)
       elseif #parsed.bare == 1 and DIRECTIVES[parsed.bare[1]] then
-        -- Bare-word directive (U5). A pending list does not bind to a
-        -- directive line -- mirroring the fenced {blurb}/{aside} prohibition
-        -- (R13a) -- so it is rejected first, exactly like every other branch
-        -- that does not consume the pending list itself; a leftover
-        -- {class: X} above {pagebreak} raises instead of silently vanishing.
+        -- Bare-word directive. A pending list does not bind to a directive
+        -- line -- mirroring the fenced {blurb}/{aside} prohibition (R13a) --
+        -- so it is rejected first, exactly like every other branch that does
+        -- not consume the pending list itself; a leftover {class: X} above
+        -- {pagebreak} raises instead of silently vanishing.
         reject_pending("attribute list does not precede a directive")
         local word = parsed.bare[1]
         local kind = DIRECTIVES[word]
@@ -386,7 +438,7 @@ function M.transform(lines, cfg, file)
         -- which is what keeps it from silently binding to whatever line
         -- happens to follow it (R21).
         reject_pending()               -- a new list may not shadow an unused one
-        pending, pending_line, pending_text = parsed, rec.number, text
+        pending, pending_text = parsed, text
         i = i + 1
       end
 
@@ -396,29 +448,24 @@ function M.transform(lines, cfg, file)
       -- exactly as the fenced form does, falling back to the bare
       -- `::: {.aside}` shape when no list precedes the run at all (R11).
       if pending then
-        open_aside(pending.classes, pending_line)
-        pending, pending_line, pending_text = nil, nil, nil
+        open_aside(pending.classes, pending.line)
+        pending, pending_text = nil, nil
       else
         open_aside({}, rec.number)
       end
-      while i <= #lines and lines[i].text:match("^A>") do
-        emit_body(strip_prefix(lines[i].text, "A>"))
-        i = i + 1
-      end
-      emit(":::")
+      consume_prefixed_run("A>")
 
-    elseif find_blurb_prefix(text) then
-      -- B> run and the eight sugar prefixes (U3) share one path (KTD10):
-      -- they differ only in what class an EMPTY pending list resolves to.
-      -- A pending list carrying its own class always wins over the prefix's
+    elseif blurb_prefix then
+      -- B> run and the eight sugar prefixes share one path (KTD10): they
+      -- differ only in what class an EMPTY pending list resolves to. A
+      -- pending list carrying its own class always wins over the prefix's
       -- implied one (KTD10a, R5a) -- the spec's own worked example renders
       -- {class: tip} above W> as a tip blurb, not a failed conversion -- so
       -- disagreement between the two is a warning, not a hard error, fired
-      -- only when they actually differ. This swallows every consecutive
-      -- line sharing the SAME prefix itself, so -- unlike the branches below
-      -- -- it advances `i` on its own and sits outside their shared trailing
-      -- increment.
-      local entry = find_blurb_prefix(text)
+      -- only when they actually differ. consume_prefixed_run swallows every
+      -- consecutive line sharing the SAME prefix and closes the div, so --
+      -- unlike the branches below -- it advances `i` on its own and sits
+      -- outside their shared trailing increment.
       local pending_classes = pending and pending.classes or {}
       -- Markua's own id syntax is the `id:` key (KTD10b), which
       -- attributes.parse lands in .keyvals.id; `.id` itself is only ever set
@@ -426,25 +473,25 @@ function M.transform(lines, cfg, file)
       -- both costs nothing and means an id reaches the div regardless of
       -- which shape produced it.
       local id = pending and (pending.id or pending.keyvals.id) or nil
-      local head, decoratives
+      local head, decoratives, applied_line
       if #pending_classes > 0 then
-        head, decoratives = callout_classes(pending_classes, cfg, file, pending_line)
-        if entry.class and head ~= entry.class then
-          errors.warn(file, pending_line, string.format(
-            "explicit class '%s' overrides %s's implied class '%s'", head, entry.prefix, entry.class), cfg.sink)
+        applied_line = pending.line
+        head, decoratives = callout_classes(pending_classes, cfg, file, applied_line)
+        if blurb_prefix.class and head ~= blurb_prefix.class then
+          errors.warn(file, applied_line, string.format(
+            "explicit class '%s' overrides %s's implied class '%s'", head, blurb_prefix.prefix, blurb_prefix.class),
+            cfg.sink)
         end
-      elseif entry.class then
-        head, decoratives = entry.class, {}
+      elseif blurb_prefix.class then
+        applied_line = rec.number
+        head, decoratives = blurb_prefix.class, {}
       else
-        head, decoratives = callout_classes({}, cfg, file, rec.number)
+        applied_line = rec.number
+        head, decoratives = callout_classes({}, cfg, file, applied_line)
       end
-      pending, pending_line, pending_text = nil, nil, nil
-      open_div(head, decoratives, "blurb", id)
-      while i <= #lines and lines[i].text:sub(1, #entry.prefix) == entry.prefix do
-        emit_body(strip_prefix(lines[i].text, entry.prefix))
-        i = i + 1
-      end
-      emit(":::")
+      pending, pending_text = nil, nil
+      open_div(head, decoratives, "blurb", id, applied_line)
+      consume_prefixed_run(blurb_prefix.prefix)
 
     else
       if pending and text:match("^#+%s") then
@@ -456,16 +503,18 @@ function M.transform(lines, cfg, file)
           reject_pending("unrecognized attribute `" .. pending.bare[1] .. "`")
           emit(text)
         else
-          emit(text .. " " .. attributes.to_pandoc_attr(pending, file, pending_line))
-          pending, pending_line, pending_text = nil, nil, nil
+          -- No explicit line: to_pandoc_attr falls back to parsed.line,
+          -- which is the same position pending.line already carries.
+          emit(text .. " " .. attributes.to_pandoc_attr(pending, file))
+          pending, pending_text = nil, nil
         end
       else
-        -- Covers plain prose, blank lines, and A> lines before U4 adds its
-        -- own branch above this one. A blank line no longer holds a pending
-        -- list across it (KTD6): spec.txt:6647 requires the attribute list
-        -- to directly precede its element with no blank line between them,
-        -- so a blank goes through the same rejection as any other unclaimed
-        -- case, not a special case that survives it.
+        -- Covers plain prose and blank lines; A> lines are handled by their
+        -- own branch above, not here. A blank line no longer holds a
+        -- pending list across it (KTD6): spec.txt:6647 requires the
+        -- attribute list to directly precede its element with no blank line
+        -- between them, so a blank goes through the same rejection as any
+        -- other unclaimed case, not a special case that survives it.
         reject_pending("attribute list precedes no element it can apply to")
         emit_body(text)
       end

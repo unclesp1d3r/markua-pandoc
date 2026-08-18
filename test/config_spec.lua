@@ -69,6 +69,20 @@ describe("config.defaults", function()
   end)
 end)
 
+describe("config.is_index_key", function()
+  it("accepts both documented index keys", function()
+    local cfg = config.defaults()
+    assert.is_true(config.is_index_key(cfg, "ix"))
+    assert.is_true(config.is_index_key(cfg, "i"))
+  end)
+
+  -- Exact match, not substring: "index" must not inherit "i" or "ix".
+  it("matches an index key exactly rather than by prefix", function()
+    local cfg = config.defaults()
+    assert.is_false(config.is_index_key(cfg, "index"))
+  end)
+end)
+
 describe("config.merge", function()
   it("lets a book override the class list", function()
     local cfg = config.merge(config.defaults(), { callout_classes = { "tip" } })
