@@ -3442,6 +3442,25 @@ describe("blocks.transform attribute lines inside a fenced body", function()
     local out = run("{blurb, class: tip}\n```json\n{\"class\": \"tip\"}\n```\n{/blurb}\n")
     assert.is_truthy(out:find('{"class": "tip"}', 1, true))
   end)
+
+  it("refuses a RECOGNIZED directive inside a {blurb} body rather than nesting a marker", function()
+    -- The narrowing is deliberate and worth pinning separately from the
+    -- unknown-word case: {pagebreak} IS in DIRECTIVES, so the easy path
+    -- would be to emit its marker here. What a directive means inside a
+    -- callout body is undecided, and emitting a marker would invent that
+    -- semantic silently rather than surfacing the question.
+    local ok, err = pcall(run, "{blurb, class: tip}\n{pagebreak}\n{/blurb}\n")
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("pagebreak", 1, true))
+  end)
+
+  it("refuses a recognized directive inside an {aside} body the same way", function()
+    local ok, err = pcall(run, "{aside}\n{pagebreak}\n{/aside}\n")
+    assert.is_false(ok)
+    local msg = tostring(err)
+    assert.is_truthy(msg:find("pagebreak", 1, true))
+    assert.is_nil(msg:find("insert=", 1, true))
+  end)
 end)
 ```
 
@@ -4168,7 +4187,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/blocks_spec.lua`
-Expected: PASS, 98 successes
+Expected: PASS, 100 successes
 
 - [ ] **Step 5: Commit**
 
@@ -4724,7 +4743,7 @@ In the attribute-line branch, before the `DIRECTIVES` lookup, add:
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/blocks_spec.lua`
-Expected: PASS, 101 successes
+Expected: PASS, 103 successes
 
 - [ ] **Step 5: Commit**
 
