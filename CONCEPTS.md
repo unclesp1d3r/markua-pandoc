@@ -53,13 +53,24 @@ the set further, so the list is config-overridable by design.
 ### Aside
 
 A sibling block construct to a Blurb, distinguished by its semantic role in the book
-rather than by its content. It shares the Blurb's configurable-class treatment, but
-only one input syntax is specified for it — a line prefix, with no fenced counterpart.
+rather than by its content. It shares the Blurb's configurable-class treatment, and,
+like a Blurb, is specified with two input syntaxes: a line prefix, and an explicitly
+fenced open/close pair.
 
 ### Matter directive
 
 A marker separating a manuscript's front matter, main matter, and back matter. It
-partitions the document rather than wrapping content, so it has no closing form.
+partitions the document rather than wrapping content, so it has no closing form. This
+project's plans also call it a structural directive — the two names refer to the same
+construct.
+
+### Insertion directive
+
+A marker that positions generated or metadata content — a back-of-book index, a table
+of contents, a list of figures — rather than partitioning the book the way a Matter
+directive does. Like a Matter directive, it is a marker with no closing form; unlike a
+Matter directive, what it names is never produced by the reader itself, only marked as
+a place something else must be produced.
 
 ### Index entry
 

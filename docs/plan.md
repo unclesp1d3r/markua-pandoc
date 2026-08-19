@@ -1923,9 +1923,26 @@ end
 local ID_PATTERN = "^[%w%-_:.\128-\255]+$"
 local CLASS_PATTERN = "^[%a\128-\255][%w%-_:.\128-\255]*$"
 
-local function check_name(kind, name, file, line)
+--- Non-raising predicate behind `check_name`: is `name` (an id or a class,
+--- per `kind`) representable in a pandoc attribute block? `check_name`
+--- delegates to this rather than duplicating the pattern choice, so there is
+--- exactly one grammar for "can pandoc read this back" -- a caller that needs
+--- to recover from an unrepresentable name instead of aborting (blocks.lua's
+--- lenient callout-class fallback, FIX 4) has a way to ask the question
+--- without triggering the raise.
+function M.is_valid_name(kind, name)
   local pattern = kind == "class" and CLASS_PATTERN or ID_PATTERN
-  if not name:match(pattern) then
+  return name:match(pattern) ~= nil
+end
+
+--- Validate that `name` (an id or a class, per `kind`) can be represented in
+--- a pandoc attribute block, raising unconditionally otherwise. Shared by
+--- `to_pandoc_attr` below and by any other module that emits an id or class
+--- pandoc did not itself derive -- blocks.lua's `open_div` is the other
+--- caller, validating a Markua `id:`/`class:` value before it reaches the
+--- literal `::: {...}` text this reader hands to pandoc.read.
+function M.check_name(kind, name, file, line)
+  if not M.is_valid_name(kind, name) then
     errors.raise(file, line, string.format("%s %q cannot be represented in a pandoc attribute", kind, name))
   end
 end
@@ -1940,11 +1957,11 @@ function M.to_pandoc_attr(parsed, file, line)
   line = line or parsed.line
   local parts = {}
   if parsed.id then
-    check_name("id", parsed.id, file, line)
+    M.check_name("id", parsed.id, file, line)
     parts[#parts + 1] = "#" .. parsed.id
   end
   for _, c in ipairs(parsed.classes) do
-    check_name("class", c, file, line)
+    M.check_name("class", c, file, line)
     parts[#parts + 1] = "." .. c
   end
   -- Sorted keys are the determinism mechanism for R18: iterating pairs()
@@ -2034,12 +2051,53 @@ describe("config.defaults", function()
     assert.is_true(config.defaults().strict)
   end)
 
+  -- KTD9: spec.txt:6895-6923 documents C> and {class: center} as a blurb
+  -- class, and the shipped defaults omitted it -- both forms raised before
+  -- U3. Pinned as its own scenario, deliberately, rather than folded
+  -- silently into the exact-set assertion below.
+  it("includes center in the documented class set (KTD9)", function()
+    local cfg = config.defaults()
+    assert.is_true(config.is_callout_class(cfg, "center"))
+  end)
+
+  -- The exact-set pin U3 adds: nine classes, not eight, now that center has
+  -- joined them. Order-independent (table.sort both sides) because
+  -- callout_classes's declaration order is not itself a documented contract.
+  it("ships exactly the documented nine callout classes", function()
+    local cfg = config.defaults()
+    local expected = {
+      "warning", "tip", "note", "information",
+      "error", "question", "discussion", "exercise", "center",
+    }
+    table.sort(expected)
+    local actual = {}
+    for _, c in ipairs(cfg.callout_classes) do
+      actual[#actual + 1] = c
+    end
+    table.sort(actual)
+    assert.same(expected, actual)
+  end)
+
   -- defaults() must build its tables per call. A shared array would let one
   -- book's override leak into the next document converted in the same process.
   it("returns independent tables on each call", function()
     local first, second = config.defaults(), config.defaults()
     first.callout_classes[#first.callout_classes + 1] = "leaked"
     assert.is_false(config.is_callout_class(second, "leaked"))
+  end)
+end)
+
+describe("config.is_index_key", function()
+  it("accepts both documented index keys", function()
+    local cfg = config.defaults()
+    assert.is_true(config.is_index_key(cfg, "ix"))
+    assert.is_true(config.is_index_key(cfg, "i"))
+  end)
+
+  -- Exact match, not substring: "index" must not inherit "i" or "ix".
+  it("matches an index key exactly rather than by prefix", function()
+    local cfg = config.defaults()
+    assert.is_false(config.is_index_key(cfg, "index"))
   end)
 end)
 
@@ -2314,9 +2372,11 @@ function M.defaults()
     -- The documented Markua 0.30 set. Leanpub itself rejects `note` in some
     -- builds and individual books narrow the list further, which is exactly
     -- why this is data a config file can replace rather than a branch.
+    -- `center` (spec.txt:6895-6923, KTD9) is the class the `C>` sugar prefix
+    -- and `{class: center}` both name -- without it here, both forms raise.
     callout_classes = {
       "warning", "tip", "note", "information",
-      "error", "question", "discussion", "exercise",
+      "error", "question", "discussion", "exercise", "center",
     },
     -- `ix` is the spec form; `i` is a widespread real-world variant that real
     -- manuscripts use, so both are recognized.
@@ -2329,7 +2389,7 @@ end
 --- Combine `overrides` onto `base`, returning a new table.
 --
 -- Shallow by design: `callout_classes = {"tip"}` must narrow the documented
--- eight to exactly `tip`, so a value replaces rather than accumulates.
+-- set to exactly `tip`, so a value replaces rather than accumulates.
 -- Neither argument is mutated -- callers hold onto `defaults()` results and a
 -- merge that wrote through would corrupt them.
 function M.merge(base, overrides)
@@ -2468,13 +2528,28 @@ end
 
 --- Is `name` one of the configured callout classes?
 --
--- A linear scan over at most eight entries. Building a set would cost more in
+-- A linear scan over a single-digit list. Building a set would cost more in
 -- allocation than it saves in lookups at this size, and unlike `errors.report`
 -- this is not the error path, so it does not defend against a malformed cfg:
 -- validation happens once, at the config-file boundary.
 function M.is_callout_class(cfg, name)
   for _, c in ipairs(cfg.callout_classes) do
     if c == name then
+      return true
+    end
+  end
+  return false
+end
+
+--- Is `key` one of the configured index keys (`ix`, `i`, and whatever a book
+--- adds)?
+--
+-- Same linear scan as `is_callout_class` above, against `cfg.index_keys`
+-- instead of `cfg.callout_classes` -- both lists are single digits long, so a
+-- set would cost more in allocation than it saves in lookups here.
+function M.is_index_key(cfg, key)
+  for _, k in ipairs(cfg.index_keys) do
+    if k == key then
       return true
     end
   end
@@ -2518,68 +2593,99 @@ git commit -m "feat: reader config with overridable callout classes"
 **Interfaces:**
 
 - Consumes: `scanner`, `attributes`, `config`, `errors`
-- Produces: `blocks.transform(lines, cfg, file) -> array of strings`. Input is scanner records; output is pandoc-markdown lines. Blurbs and asides become fenced divs (`::: {.tip .blurb}` … `:::`), matter directives become fenced divs (`::: {.frontmatter}` … `:::` is *not* used; they emit `::: {.matter matter="frontmatter"}` self-closing markers, carrying the bare word verbatim so there is no mapping table to drift), `{class: part}` attaches to the following heading.
+- Produces: `blocks.transform(lines, cfg, file) -> array of strings`. Input is scanner records; output is pandoc-markdown lines. Blurbs accept three syntaxes — a class-bearing attribute list above a `B>` run, the eight sugar prefixes `C/D/E/I/Q/T/W/X>` with their own implied class, and the fenced `{blurb, class: X}` … `{/blurb}` form — all producing the same fenced div, with the callout class heading the class list, any decorative classes riding between it and the marker, and `.blurb` last (`::: {.tip .wide .blurb}`). Asides accept two syntaxes — an `A>` run and the fenced `{aside}` … `{/aside}` form — sharing the same head-class-then-marker shape with `.aside` last in place of `.blurb`. Structural directives (`frontmatter`, `mainmatter`, `backmatter`) and insertion directives (`pagebreak`, the title/front-matter inserts, `toc`, `figures`, `tables`, `index`, `exercise-answers`, `quiz-answers`) both lower to self-closing marker pairs — `::: {.matter matter="word"}` and `::: {.insert insert="word"}` respectively — carrying the bare word verbatim in both the class and the attribute value, so there is no mapping table to drift. `{class: part}` attaches to the following heading.
 
 - [ ] **Step 1: Write the failing test**
 
 Create `test/blocks_spec.lua`:
 
 ```lua
+-- Spec for the block-construct pass (src/markua/blocks.lua).
+--
+-- Written before the module exists: this unit's TDD cycle starts red. Run with
+-- `busted test/blocks_spec.lua` from the repo root -- require("src.markua.blocks")
+-- resolves through .busted's lpath only from there.
+--
+-- The first describe block below covers the pass skeleton and the pending
+-- attribute-list lifecycle: fence passthrough, the {class: part} heading
+-- attach, the index-only passthrough, and every path an unclaimed attribute
+-- list can take out of the pending state. Blurbs, the sugar prefixes, asides,
+-- and the bare-word directive table each have their own describe block below
+-- this one; a bare word none of THEM recognizes -- {nonsense}, covered under
+-- directives -- is what exercises this pass's generic "unclaimed attribute
+-- list" fallback instead of a construct-specific marker.
 local scanner = require("src.markua.scanner")
 local config = require("src.markua.config")
 local blocks = require("src.markua.blocks")
 
-local function run(text)
-  return table.concat(blocks.transform(scanner.scan(text), config.defaults(), "f.md"), "\n")
+-- A sink that swallows errors.warn's output so a lenient-mode test does not
+-- spew "warning: ..." over the test run's own output.
+local function quiet_sink()
+  return { write = function() end }
+end
+
+-- A sink that records errors.warn's output instead of swallowing it, for the
+-- scenario that must observe KTD10a's warning-on-override rather than
+-- merely not crash on it.
+local function capturing_sink()
+  local sink = { writes = {} }
+  sink.write = function(self, ...)
+    local parts = {}
+    for _, v in ipairs({ ... }) do
+      parts[#parts + 1] = tostring(v)
+    end
+    table.insert(self.writes, table.concat(parts))
+  end
+  return sink
+end
+
+local function lenient_cfg()
+  return config.merge(config.defaults(), { strict = false, sink = quiet_sink() })
+end
+
+-- Most scenarios only need the joined text; the lenient-position scenarios
+-- need the raw array so they can assert an exact output INDEX rather than a
+-- substring's mere presence within one giant string.
+local function run_lines(text, cfg)
+  return blocks.transform(scanner.scan(text), cfg or config.defaults(), "f.md")
+end
+
+local function run(text, cfg)
+  return table.concat(run_lines(text, cfg), "\n")
 end
 
 describe("blocks.transform", function()
-  it("converts B> blurbs with a class into fenced divs", function()
-    local out = run("{class: tip}\nB> Press Ctrl-R.\n")
-    assert.is_truthy(out:find("::: {.tip .blurb}", 1, true))
-    assert.is_truthy(out:find("Press Ctrl%-R%."))
-    assert.is_truthy(out:find(":::", 1, true))
-  end)
-
-  it("converts the fenced blurb form", function()
-    local out = run("{blurb, class: warning}\nBack up first.\n{/blurb}\n")
-    assert.is_truthy(out:find("::: {.warning .blurb}", 1, true))
-  end)
-
-  it("converts A> asides", function()
-    local out = run("A> ### Why\nA>\nA> Because.\n")
-    assert.is_truthy(out:find("::: {.aside}", 1, true))
-    assert.is_truthy(out:find("### Why", 1, true))
-  end)
-
   it("attaches {class: part} to the following heading", function()
     local out = run("{class: part}\n# Foundations\n")
     assert.is_truthy(out:find("# Foundations {.part}", 1, true))
   end)
 
-  it("never transforms inside code fences", function()
+  it("never transforms a JSON code block containing an attribute-shaped line", function()
     local out = run('```json\n{"class": "tip"}\n```\n')
     assert.is_truthy(out:find('{"class": "tip"}', 1, true))
     assert.is_nil(out:find(":::", 1, true))
   end)
 
-  it("rejects an unknown callout class", function()
-    local ok, err = pcall(run, "{class: bogus}\nB> x\n")
-    assert.is_false(ok)
-    assert.is_truthy(tostring(err):find("bogus", 1, true))
-  end)
-
-  it("accepts a decorative class alongside the callout class", function()
-    local out = run("{.wide, class: tip}\nB> hi\n")
-    assert.is_truthy(out:find(".tip", 1, true))
+  it("never transforms B> or {/blurb} inside a code fence", function()
+    local out = run("```markua\nB> not a blurb\n{/blurb}\n```\n")
+    assert.is_truthy(out:find("B> not a blurb", 1, true))
+    assert.is_truthy(out:find("{/blurb}", 1, true))
+    assert.is_nil(out:find(":::", 1, true))
   end)
 
   it("rejects an attribute list that precedes a plain paragraph", function()
-    -- The B> path already raises; this one used to leak "{.bogus}" into the
-    -- output as literal text, which is the corruption hard errors exist to stop.
-    local ok, err = pcall(run, "{class: bogus}\nJust a paragraph.\n")
+    local ok, err = pcall(run, "{class: tip}\nJust a paragraph.\n")
     assert.is_false(ok)
-    assert.is_truthy(tostring(err):find("bogus", 1, true))
+    assert.is_truthy(tostring(err):find("{class: tip}", 1, true))
+  end)
+
+  it("rejects an attribute list separated from a B> run by a blank line", function()
+    -- A blank line disqualifies a pending attribute list before it reaches
+    -- the B> branch below (KTD6) -- the rejection must fire on the blank
+    -- itself, not survive across it to (wrongly) attach to the run that
+    -- follows.
+    local ok = pcall(run, "{class: tip}\n\nB> hi\n")
+    assert.is_false(ok)
   end)
 
   it("rejects an attribute list left unconsumed at end of input", function()
@@ -2592,40 +2698,768 @@ describe("blocks.transform", function()
     assert.is_false(ok)
   end)
 
-  it("passes a standalone index line through untouched", function()
+  it("passes a standalone index line through untouched, not as a pending list", function()
     -- inline.transform runs after this pass and owns index markers. Claiming
-    -- it here would render {ix="B-tree"} as visible text in the book.
+    -- it here would render {ix: "B-tree"} as visible text in the book.
     local out = run('{ix: "B-tree"}\n\nB-trees are fast.\n')
     assert.is_truthy(out:find('{ix: "B-tree"}', 1, true))
   end)
 
-  it("puts the callout class ahead of the .blurb marker", function()
-    -- Load-bearing, not cosmetic. pandoc's DocBook writer matches only the
-    -- head of the class list, so "{.blurb .tip}" degrades to a bare <para>
-    -- with no error anywhere while "{.tip .blurb}" becomes a real <tip>.
-    local out = run("{class: tip}\nB> hi\n")
-    assert.is_truthy(out:find("::: {.tip .blurb}", 1, true))
+  it("re-emits a rejected attribute list before any line that followed it, under --lenient", function()
+    local lines = run_lines("{class: tip}\n\nJust a paragraph.\n", lenient_cfg())
+    local pending_index, paragraph_index
+    for idx, line in ipairs(lines) do
+      if line == "{class: tip}" then
+        pending_index = idx
+      elseif line == "Just a paragraph." then
+        paragraph_index = idx
+      end
+    end
+    assert.is_truthy(pending_index)
+    assert.is_truthy(paragraph_index)
+    assert.is_true(pending_index < paragraph_index)
   end)
 
-  it("escapes a body line that would close the fence early", function()
-    -- pandoc's own markdown writer escapes this rather than erroring, and the
-    -- escaped form reads back identically. Erroring would reject a document
-    -- pandoc handles fine.
+  it("places a rejected attribute list before the directive marker that follows it, under --lenient", function()
+    -- {pagebreak} is a recognized directive, so it does not fall through the
+    -- unclaimed-attribute-list path itself -- it opens its own self-closing
+    -- marker. What this pins down is ORDER: the pending {class: tip} list
+    -- must be re-emitted BEFORE that marker, not after it.
+    local lines = run_lines("{class: tip}\n{pagebreak}\n", lenient_cfg())
+    local tip_index, marker_index
+    for idx, line in ipairs(lines) do
+      if line == "{class: tip}" then
+        tip_index = idx
+      elseif line:find('insert="pagebreak"', 1, true) then
+        marker_index = idx
+      end
+    end
+    assert.is_truthy(tip_index)
+    assert.is_truthy(marker_index)
+    assert.is_true(tip_index < marker_index)
+  end)
+
+  it("raises in strict mode when an attribute list precedes a directive line", function()
+    -- A directive line does not consume a pending list.
+    local ok = pcall(run, "{class: tip}\n{pagebreak}\n")
+    assert.is_false(ok)
+  end)
+
+  it("raises in strict mode when an attribute list precedes a fenced {blurb} opener", function()
+    -- Per R13a, a preceding list is illegal above a fenced {blurb} opener --
+    -- the {blurb} branch rejects it before opening the div, so the hard
+    -- error the author sees comes from that branch, not the generic
+    -- unclaimed-attribute-list fallback.
+    local ok = pcall(run, "{class: tip}\n{blurb, class: warning}\n")
+    assert.is_false(ok)
+  end)
+
+  -- FIX 1: a pending attribute list must not survive a fenced code block and
+  -- silently bind to whatever construct follows it. Before this fix, the
+  -- `in_code` branch was the only non-consuming branch that skipped
+  -- reject_pending, so {class: tip} above a fenced sample jumped the fence
+  -- and turned a following W> (warning) into a tip -- wrong class, no error,
+  -- in strict mode.
+  it("raises in strict mode when an attribute list precedes a fenced code block", function()
+    local ok = pcall(run, "{class: tip}\n```json\n{\"a\": 1}\n```\nW> body\n")
+    assert.is_false(ok)
+  end)
+
+  it("re-emits a pending list before the fence, not after, under --lenient (FIX 1)", function()
+    local lines = run_lines("{class: tip}\n```json\n{\"a\": 1}\n```\nW> body\n", lenient_cfg())
+    local pending_index, fence_index, warning_index
+    for idx, line in ipairs(lines) do
+      if line == "{class: tip}" then
+        pending_index = idx
+      elseif line == "```json" then
+        fence_index = idx
+      elseif line == "::: {.warning .blurb}" then
+        warning_index = idx
+      end
+    end
+    assert.is_truthy(pending_index)
+    assert.is_truthy(fence_index)
+    assert.is_truthy(warning_index)
+    assert.is_true(pending_index < fence_index)
+    -- The tip class did NOT jump the fence and bind to W> -- it stayed a
+    -- warning blurb, its own implied class, not a tip.
+    assert.is_true(fence_index < warning_index)
+  end)
+
+  it("escapes a standalone ::: body line so it cannot close a fence this pass opened", function()
+    local out = run(":::\n")
+    assert.is_truthy(out:find("\\:::", 1, true))
+  end)
+
+  it("escapes a standalone $$ body line the same way", function()
+    local out = run("$$\n")
+    assert.is_truthy(out:find("\\$$", 1, true))
+  end)
+
+  -- FIX 2: the escape must catch ":::"-shaped lines carrying attributes, not
+  -- only a bare colon run. Verified against the reader's TARGET_FORMAT (see
+  -- the comment on emit_body in blocks.lua): "::: {.example}" opens a real
+  -- nested Div in pandoc's own grammar, so an unescaped instance inside a
+  -- B> body doesn't just look wrong -- the construct's own generated closer
+  -- then closes that INNER div instead of the blurb, and everything
+  -- afterward gets silently swallowed into the still-open outer div.
+  it("escapes a ::: body line that carries attributes, not only a bare colon run", function()
+    local out = run("{class: tip}\nB> ::: {.example}\nB> inside\n")
+    assert.is_truthy(out:find("\\::: {.example}", 1, true))
+  end)
+
+  it("keeps content after the construct OUTSIDE the div once the nested-looking line is escaped (FIX 2)", function()
+    -- blocks.transform's own line array can't observe pandoc's nested-Div
+    -- parsing directly (that requires the pandoc oracle, run separately) --
+    -- but it CAN pin the shape the fix depends on: exactly one opener line
+    -- and one closer line around the escaped body, with the trailing
+    -- paragraph positioned after the closer rather than swallowed into a
+    -- count that quietly shifted because the escape changed how many lines
+    -- this pass consumes.
+    local lines = run_lines("{class: tip}\nB> ::: {.example}\nB> inside\n\nAfter the blurb.\n")
+    local open_idx, escaped_idx, close_idx, after_idx
+    for idx, line in ipairs(lines) do
+      if line == "::: {.tip .blurb}" then
+        open_idx = idx
+      elseif line == "\\::: {.example}" then
+        escaped_idx = idx
+      elseif line == ":::" and open_idx and not close_idx then
+        close_idx = idx
+      elseif line == "After the blurb." then
+        after_idx = idx
+      end
+    end
+    assert.is_truthy(open_idx)
+    assert.is_truthy(escaped_idx)
+    assert.is_truthy(close_idx)
+    assert.is_truthy(after_idx)
+    assert.is_true(open_idx < escaped_idx)
+    assert.is_true(escaped_idx < close_idx)
+    assert.is_true(close_idx < after_idx)
+  end)
+end)
+
+-- B> runs and the fenced {blurb} ... {/blurb} form, both syntaxes
+-- producing the identical div per R3.
+describe("blocks.transform blurbs", function()
+  it("converts {class: tip} above a B> run into a fenced div", function()
+    local out = run("{class: tip}\nB> Press Ctrl-R.\n")
+    assert.is_truthy(out:find("::: {.tip .blurb}", 1, true))
+    assert.is_truthy(out:find("Press Ctrl%-R%."))
+    assert.is_truthy(out:find(":::", 1, true))
+  end)
+
+  it("puts the callout class ahead of the .blurb marker", function()
+    -- Load-bearing, not cosmetic (see the comment on open_div in blocks.lua):
+    -- pandoc's DocBook writer matches only the head of the class list.
+    local out = run("{class: tip}\nB> hi\n")
+    local blurb_at = out:find("::: {.tip .blurb}", 1, true)
+    assert.is_truthy(blurb_at)
+    -- ".blurb" must not appear before ".tip" anywhere in that same marker.
+    assert.is_nil(out:find("::: {.blurb .tip}", 1, true))
+  end)
+
+  it("converts the fenced {blurb, class: X} ... {/blurb} form identically", function()
+    local out = run("{blurb, class: warning}\nBack up first.\n{/blurb}\n")
+    assert.is_truthy(out:find("::: {.warning .blurb}", 1, true))
+    assert.is_truthy(out:find("Back up first.", 1, true))
+  end)
+
+  it("defaults a B> run with no pending attribute list to information", function()
+    local out = run("B> hi\n")
+    assert.is_truthy(out:find("::: {.information .blurb}", 1, true))
+  end)
+
+  it("carries a decorative class alongside the callout class, marker last", function()
+    -- attributes.parse splits one class: value on whitespace (KTD10b), so
+    -- {class: "tip wide"} arrives as classes = {"tip", "wide"} -- not a
+    -- per-class shorthand. The registered class heads the list, the
+    -- decorative one survives between it and the marker.
+    local out = run('{class: "tip wide"}\nB> hi\n')
+    assert.is_truthy(out:find("::: {.tip .wide .blurb}", 1, true))
+  end)
+
+  it("raises on an unregistered callout class, naming the offender", function()
+    local ok, err = pcall(run, "{class: bogus}\nB> hi\n")
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("bogus", 1, true))
+  end)
+
+  it("downgrades an unregistered callout class under --lenient, keeping the author's class", function()
+    -- AGENTS.md makes --lenient downgrade a hard error to a warning, and an
+    -- unregistered class is one. Without this the flag could recover from an
+    -- unclaimed attribute list but not from a bad class -- and a class this
+    -- book's list rejects is exactly what --lenient exists to triage, since
+    -- real Leanpub builds reject `note` and books narrow the set further.
+    local out = table.concat(blocks.transform(
+      scanner.scan("{class: bogus}\nB> hi\n"), lenient_cfg(), "f.md"), "\n")
+    assert.is_truthy(out:find("::: {.bogus .blurb}", 1, true))
+    assert.is_truthy(out:find("hi", 1, true))
+  end)
+
+  it("names the known spelling when only letter case differs (KTD8)", function()
+    local ok, err = pcall(run, "{class: Tip}\nB> hi\n")
+    assert.is_false(ok)
+    local msg = tostring(err)
+    assert.is_truthy(msg:find("Tip", 1, true))
+    assert.is_truthy(msg:find("tip", 1, true))
+  end)
+
+  it("raises on an unclosed {blurb}, naming the opening line", function()
+    local ok, err = pcall(run, "{blurb, class: tip}\nnever closes\n")
+    assert.is_false(ok)
+    local msg = tostring(err)
+    assert.is_truthy(msg:find("unclosed", 1, true))
+    assert.is_truthy(msg:find("f.md:1", 1, true))
+  end)
+
+  it("does not let a {/blurb} inside a fenced code block close the blurb", function()
+    local out = run("{blurb, class: tip}\n```\n{/blurb}\n```\nreal end\n{/blurb}\n")
+    local _, count = out:gsub(":::", "")
+    assert.equals(2, count)  -- only the real opener and the real closer
+    assert.is_truthy(out:find("real end", 1, true))
+  end)
+
+  it("escapes a ::: body line inside a B> run", function()
     local out = run("{class: tip}\nB> before\nB> :::\nB> after\n")
     assert.is_truthy(out:find("\\:::", 1, true))
   end)
 
-  it("emits a matter directive with the bare word verbatim", function()
-    -- The interface documents these exact values; carrying the bare word
-    -- through means there is no mapping table to drift out of sync.
-    local out = run("{frontmatter}\n")
-    assert.is_truthy(out:find('::: {.matter matter="frontmatter"}', 1, true))
+  it("does not let a second B> run inherit an earlier run's class", function()
+    local out = run("{class: tip}\nB> first\n\nB> second\n")
+    assert.is_truthy(out:find("::: {.tip .blurb}", 1, true))
+    assert.is_truthy(out:find("::: {.information .blurb}", 1, true))
   end)
 
-  it("never transforms B> or {/blurb} inside a code fence", function()
-    local out = run("```markua\nB> not a blurb\n{/blurb}\n```\n")
-    assert.is_truthy(out:find("B> not a blurb", 1, true))
+  it("rejects a decorative class pandoc's attribute syntax cannot represent, naming it", function()
+    -- attributes.check_name rejects a class starting with a digit
+    -- (CLASS_PATTERN requires a leading letter). Without this check, open_div
+    -- would emit "::: {.tip .3bad .blurb}" verbatim, and pandoc rejects the
+    -- WHOLE attribute block on the illegal class -- destroying the blurb and
+    -- leaking literal braces into the finished book.
+    local ok, err = pcall(run, '{class: "tip 3bad"}\nB> hi\n')
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("3bad", 1, true))
+  end)
+
+  it("rejects an id pandoc's attribute syntax cannot represent, naming it", function()
+    -- ID_PATTERN has no allowance for whitespace, so a pending list's
+    -- id: carrying a space must be rejected the same way an invalid class
+    -- is, before it reaches the div's attribute block.
+    local ok, err = pcall(run, '{id: "bad id"}\nT> hi\n')
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("bad id", 1, true))
+  end)
+
+  -- FIX 3: consume_until_close checked `in_code` to decide whether a line
+  -- could be the closer, but emitted every body line through emit_body
+  -- unconditionally -- so a code sample legitimately containing a bare
+  -- ":::" line, nested inside a fenced {blurb}, got a spurious backslash
+  -- injected into what the author wrote verbatim. AGENTS.md's fence-
+  -- awareness rule (content inside a fenced code block is never Markua)
+  -- applies to emission exactly as it already applied to the closer check.
+  it("does not escape a ::: line inside a fenced code block nested in a {blurb}", function()
+    local out = run("{blurb, class: tip}\n```\n:::\n```\n{/blurb}\n")
+    assert.is_nil(out:find("\\:::", 1, true))
+    assert.is_truthy(out:find("\n:::\n", 1, true))
+  end)
+
+  -- FIX 4: an unregistered callout class recovers under --lenient by
+  -- adopting the author's own class as the div's head -- but open_div runs
+  -- that head through attributes.check_name, which raises UNCONDITIONALLY
+  -- on a name pandoc's attribute grammar cannot represent. A class that is
+  -- BOTH unregistered AND unrepresentable (e.g. "3bad") therefore aborted
+  -- identically under --lenient and under strict, before resolve_callout_class
+  -- learned to check representability before adopting the head.
+  it("still raises in strict mode for a class that is both unregistered and unrepresentable", function()
+    local ok = pcall(run, '{class: "3bad"}\nB> hi\n')
+    assert.is_false(ok)
+  end)
+
+  it("falls back to information under --lenient when the recovered class is unrepresentable (FIX 4)", function()
+    local out = table.concat(blocks.transform(
+      scanner.scan('{class: "3bad"}\nB> hi\n'), lenient_cfg(), "f.md"), "\n")
+    assert.is_truthy(out:find("::: {.information .blurb}", 1, true))
+    assert.is_truthy(out:find("hi", 1, true))
+  end)
+
+  it("recovers an aside to its own bare shape, not the blurb's information default", function()
+    -- The two constructs disagree on the fallback: a blurb defaults to
+    -- `information` (R4), a bare aside carries no callout class at all (R11).
+    -- Answering `information` for both gave a recovered aside
+    -- `::: {.information .aside}`, which the callout filter styles as a
+    -- blurb -- wrong output rather than merely degraded output.
+    local out = table.concat(blocks.transform(
+      scanner.scan('{class: "3bad"}\nA> hi\n'), lenient_cfg(), "f.md"), "\n")
+    assert.is_truthy(out:find("::: {.aside}", 1, true))
+    assert.is_nil(out:find("information", 1, true))
+  end)
+
+  it("keeps a supplied id while recovering an aside under --lenient", function()
+    local out = table.concat(blocks.transform(
+      scanner.scan('{class: "3bad", id: sidebar}\nA> hi\n'), lenient_cfg(), "f.md"), "\n")
+    assert.is_truthy(out:find("::: {#sidebar .aside}", 1, true))
+  end)
+
+  -- FIX 5: id: was dropped on the fenced {blurb, id: ...} path even though
+  -- the sugar-prefix path already carried one through, silently losing a
+  -- cross-reference anchor -- the plan's R3 requires the fenced form to
+  -- produce the identical div to the run form, id included.
+  it("carries an id: through the fenced {blurb, id: ...} form", function()
+    local out = run("{blurb, class: tip, id: sidebar}\nhi\n{/blurb}\n")
+    assert.is_truthy(out:find("::: {#sidebar .tip .blurb}", 1, true))
+  end)
+
+  -- FIX 6: every prior blurb scenario only checked substring presence in a
+  -- joined string, so nothing pinned the body to actually landing BETWEEN
+  -- the opener and closer -- a reordering mutation in consume_prefixed_run
+  -- or consume_until_close would corrupt every emitted div while every
+  -- substring assertion above kept passing.
+  it("keeps a B> run's body strictly between its opener and closer", function()
+    local lines = run_lines("{class: tip}\nB> line one\nB> line two\n\nAfter.\n")
+    local open_idx, body1_idx, body2_idx, close_idx, after_idx
+    for idx, line in ipairs(lines) do
+      if line == "::: {.tip .blurb}" then
+        open_idx = idx
+      elseif line == "line one" then
+        body1_idx = idx
+      elseif line == "line two" then
+        body2_idx = idx
+      elseif line == ":::" and open_idx and not close_idx then
+        close_idx = idx
+      elseif line == "After." then
+        after_idx = idx
+      end
+    end
+    assert.is_truthy(open_idx)
+    assert.is_truthy(body1_idx)
+    assert.is_truthy(body2_idx)
+    assert.is_truthy(close_idx)
+    assert.is_truthy(after_idx)
+    assert.is_true(open_idx < body1_idx)
+    assert.is_true(body1_idx < body2_idx)
+    assert.is_true(body2_idx < close_idx)
+    assert.is_true(close_idx < after_idx)
+  end)
+
+  it("keeps a fenced {blurb} body strictly between its opener and closer", function()
+    local lines = run_lines("{blurb, class: warning}\nBack up first.\nAlso this.\n{/blurb}\n\nAfter.\n")
+    local open_idx, body1_idx, body2_idx, close_idx, after_idx
+    for idx, line in ipairs(lines) do
+      if line == "::: {.warning .blurb}" then
+        open_idx = idx
+      elseif line == "Back up first." then
+        body1_idx = idx
+      elseif line == "Also this." then
+        body2_idx = idx
+      elseif line == ":::" and open_idx and not close_idx then
+        close_idx = idx
+      elseif line == "After." then
+        after_idx = idx
+      end
+    end
+    assert.is_truthy(open_idx)
+    assert.is_truthy(body1_idx)
+    assert.is_truthy(body2_idx)
+    assert.is_truthy(close_idx)
+    assert.is_truthy(after_idx)
+    assert.is_true(open_idx < body1_idx)
+    assert.is_true(body1_idx < body2_idx)
+    assert.is_true(body2_idx < close_idx)
+    assert.is_true(close_idx < after_idx)
+  end)
+end)
+
+-- A> runs and the fenced {aside} ... {/aside} form. A bare aside has no
+-- callout-class default (unlike a blurb's `information`, R4); a pending
+-- attribute list above an A> run is APPLIED, not dropped (KTD7), while one
+-- above a fenced opener raises (R13a), mirroring the blurb prohibition.
+describe("blocks.transform asides", function()
+  it("converts an A> run with no pending attribute list into a bare aside div", function()
+    local out = run("A> ### Why\nA>\nA> Because.\n")
+    assert.is_truthy(out:find("::: {.aside}", 1, true))
+    assert.is_truthy(out:find("### Why", 1, true))
+    assert.is_truthy(out:find("Because.", 1, true))
+  end)
+
+  it("converts the fenced {aside} ... {/aside} form into the identical bare div", function()
+    local out = run("{aside}\nSome side note.\n{/aside}\n")
+    assert.is_truthy(out:find("::: {.aside}", 1, true))
+    assert.is_truthy(out:find("Some side note.", 1, true))
+  end)
+
+  it("raises on an unclosed {aside}, naming the opening line", function()
+    local ok, err = pcall(run, "{aside}\nnever closes\n")
+    assert.is_false(ok)
+    local msg = tostring(err)
+    assert.is_truthy(msg:find("unclosed", 1, true))
+    assert.is_truthy(msg:find("f.md:1", 1, true))
+  end)
+
+  it("applies a pending attribute list above an A> run instead of dropping it", function()
+    local out = run("{class: tip}\nA> hi\n")
+    assert.is_truthy(out:find("::: {.tip .aside}", 1, true))
+  end)
+
+  it("raises on an unregistered callout class above an A> run, naming the offender", function()
+    local ok, err = pcall(run, "{class: bogus}\nA> hi\n")
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("bogus", 1, true))
+  end)
+
+  it("resolves inline attributes on a fenced {aside} opener like a fenced blurb's", function()
+    local out = run("{aside, class: tip}\nhi\n{/aside}\n")
+    assert.is_truthy(out:find("::: {.tip .aside}", 1, true))
+  end)
+
+  it("raises when an attribute list precedes a fenced {aside} opener (R13a)", function()
+    local ok = pcall(run, "{class: tip}\n{aside}\nhi\n{/aside}\n")
+    assert.is_false(ok)
+  end)
+
+  it("does not let a {/aside} inside a fenced code block close the aside", function()
+    local out = run("{aside}\n```\n{/aside}\n```\nreal end\n{/aside}\n")
+    local _, count = out:gsub(":::", "")
+    assert.equals(2, count)  -- only the real opener and the real closer
+    assert.is_truthy(out:find("real end", 1, true))
+  end)
+
+  it("never transforms an A> line inside a fenced code block", function()
+    local out = run("```markua\nA> not an aside\n```\n")
+    assert.is_truthy(out:find("A> not an aside", 1, true))
     assert.is_nil(out:find(":::", 1, true))
+  end)
+
+  -- FIX 5: id: was dropped on both the A> and fenced {aside, id: ...} paths.
+  it("carries a pending list's id: onto an A> run's div", function()
+    local out = run("{id: sidebar}\nA> hi\n")
+    assert.is_truthy(out:find("::: {#sidebar .aside}", 1, true))
+  end)
+
+  it("carries a pending list's id: onto an A> run's div alongside a class", function()
+    local out = run('{class: tip, id: sidebar}\nA> hi\n')
+    assert.is_truthy(out:find("::: {#sidebar .tip .aside}", 1, true))
+  end)
+
+  it("carries an id: through the fenced {aside, id: ...} form", function()
+    local out = run("{aside, class: tip, id: sidebar}\nhi\n{/aside}\n")
+    assert.is_truthy(out:find("::: {#sidebar .tip .aside}", 1, true))
+  end)
+
+  -- FIX 6: pin the body strictly between opener and closer, the way the
+  -- blurb describe block above does for its two forms.
+  it("keeps an A> run's body strictly between its opener and closer", function()
+    local lines = run_lines("{class: tip}\nA> line one\nA> line two\n\nAfter.\n")
+    local open_idx, body1_idx, body2_idx, close_idx, after_idx
+    for idx, line in ipairs(lines) do
+      if line == "::: {.tip .aside}" then
+        open_idx = idx
+      elseif line == "line one" then
+        body1_idx = idx
+      elseif line == "line two" then
+        body2_idx = idx
+      elseif line == ":::" and open_idx and not close_idx then
+        close_idx = idx
+      elseif line == "After." then
+        after_idx = idx
+      end
+    end
+    assert.is_truthy(open_idx)
+    assert.is_truthy(body1_idx)
+    assert.is_truthy(body2_idx)
+    assert.is_truthy(close_idx)
+    assert.is_truthy(after_idx)
+    assert.is_true(open_idx < body1_idx)
+    assert.is_true(body1_idx < body2_idx)
+    assert.is_true(body2_idx < close_idx)
+    assert.is_true(close_idx < after_idx)
+  end)
+
+  it("keeps a fenced {aside} body strictly between its opener and closer", function()
+    local lines = run_lines("{aside, class: tip}\nSide one.\nSide two.\n{/aside}\n\nAfter.\n")
+    local open_idx, body1_idx, body2_idx, close_idx, after_idx
+    for idx, line in ipairs(lines) do
+      if line == "::: {.tip .aside}" then
+        open_idx = idx
+      elseif line == "Side one." then
+        body1_idx = idx
+      elseif line == "Side two." then
+        body2_idx = idx
+      elseif line == ":::" and open_idx and not close_idx then
+        close_idx = idx
+      elseif line == "After." then
+        after_idx = idx
+      end
+    end
+    assert.is_truthy(open_idx)
+    assert.is_truthy(body1_idx)
+    assert.is_truthy(body2_idx)
+    assert.is_truthy(close_idx)
+    assert.is_truthy(after_idx)
+    assert.is_true(open_idx < body1_idx)
+    assert.is_true(body1_idx < body2_idx)
+    assert.is_true(body2_idx < close_idx)
+    assert.is_true(close_idx < after_idx)
+  end)
+end)
+
+-- The eight documented syntactic-sugar blurb prefixes (C/D/E/I/Q/T/W/X>)
+-- open blurbs of their specified class instead of passing through as literal
+-- prose (R5). B> stays the no-implied-class case. KTD10a governs precedence
+-- when a pending attribute list disagrees with a prefix's implied class: the
+-- explicit class wins and the conversion still succeeds, with a warning to
+-- the sink so the author learns the two signals disagree (R5a).
+describe("blocks.transform blurb sugar prefixes", function()
+  local prefix_classes = {
+    C = "center",
+    D = "discussion",
+    E = "error",
+    I = "information",
+    Q = "question",
+    T = "tip",
+    W = "warning",
+    X = "exercise",
+  }
+
+  for letter, class in pairs(prefix_classes) do
+    it("opens a " .. class .. " blurb for the " .. letter .. "> prefix", function()
+      local out = run(letter .. "> hi\n")
+      assert.is_truthy(out:find("::: {." .. class .. " .blurb}", 1, true))
+    end)
+  end
+
+  it("collects every line of a multi-line T> run into one div", function()
+    local out = run("T> line one\nT> line two\n")
+    assert.is_truthy(out:find("::: {.tip .blurb}", 1, true))
+    assert.is_truthy(out:find("line one", 1, true))
+    assert.is_truthy(out:find("line two", 1, true))
+    local _, count = out:gsub(":::", "")
+    assert.equals(2, count)  -- exactly one opener and one closer
+  end)
+
+  it("renders C> and {class: center} above a B> run identically", function()
+    local sugar = run("C> hi\n")
+    local spelled_out = run("{class: center}\nB> hi\n")
+    assert.equals(sugar, spelled_out)
+  end)
+
+  it("does not transform a sugar prefix inside a fenced code block", function()
+    local out = run("```markua\nT> not a tip\n```\n")
+    assert.is_truthy(out:find("T> not a tip", 1, true))
+    assert.is_nil(out:find(":::", 1, true))
+  end)
+
+  it("lets an explicit {class: X} above a sugar prefix override its implied class", function()
+    -- The spec's own worked example: {class: tip} above W> renders as a tip
+    -- blurb, not a failed conversion. The warning this also emits (R5a) is
+    -- covered by its own scenario below; quiet it here so it does not spew
+    -- over this run's output.
+    local out = run("{class: tip}\nW> hi\n", config.merge(config.defaults(), { sink = quiet_sink() }))
+    assert.is_truthy(out:find("::: {.tip .blurb}", 1, true))
+  end)
+
+  it("emits a warning when an explicit class overrides a sugar prefix's implied class", function()
+    local sink = capturing_sink()
+    local cfg = config.merge(config.defaults(), { sink = sink })
+    run("{class: tip}\nW> hi\n", cfg)
+    assert.is_true(#sink.writes > 0)
+  end)
+
+  it("adds only the decorative class, with no warning, when the explicit class agrees with the prefix", function()
+    local sink = capturing_sink()
+    local cfg = config.merge(config.defaults(), { sink = sink })
+    local out = run('{class: "tip wide"}\nT> hi\n', cfg)
+    assert.is_truthy(out:find("::: {.tip .wide .blurb}", 1, true))
+    assert.equals(0, #sink.writes)
+  end)
+
+  it("does not claim the recovery fallback was an explicit override", function()
+    -- Under --lenient an unregistered-and-unrepresentable class resolves to
+    -- `information`. Reporting that as "explicit class 'information'
+    -- overrides W>'s implied class 'warning'" names a class the author never
+    -- wrote, contradicting the accurate warning already emitted for it.
+    local sink = capturing_sink()
+    local cfg = config.merge(config.defaults(), { strict = false, sink = sink })
+    run('{class: "3bad"}\nW> hi\n', cfg)
+    local joined = table.concat(sink.writes, "\n")
+    assert.is_truthy(joined:find("3bad", 1, true))
+    assert.is_nil(joined:find("overrides", 1, true))
+  end)
+
+  it("carries an {id: sidebar} pending list's id onto a sugar prefix's div, keeping its class", function()
+    -- A list with no class overrides nothing: `tip` still comes from the
+    -- prefix, but the id rides along.
+    local out = run("{id: sidebar}\nT> hi\n")
+    assert.is_truthy(out:find("::: {#sidebar .tip .blurb}", 1, true))
+  end)
+end)
+
+-- The closed set of fifteen Markua 0.30 bare-word directives, each
+-- lowering to a self-closing marker rather than a wrapping pair (R16, R17).
+-- `frontmatter` rides the `.matter` family alongside `mainmatter` and
+-- `backmatter` even though the spec says the directive "does not exist"
+-- (KTD5); `pagebreak` rides `.insert` alongside the front- and back-matter
+-- insertion directives (KTD4). A bare word outside this table still exercises
+-- the generic unclaimed-attribute-list fallback and raises, naming the word.
+describe("blocks.transform directives", function()
+  it("emits ::: {.matter matter=\"frontmatter\"} for {frontmatter}, word verbatim", function()
+    local out = run("{frontmatter}\n")
+    assert.is_truthy(out:find('::: {.matter matter="frontmatter"}', 1, true))
+    assert.is_truthy(out:find(":::\n", 1, true) or out:find(":::$"))
+  end)
+
+  it("emits the matter marker for {mainmatter}", function()
+    local out = run("{mainmatter}\n")
+    assert.is_truthy(out:find('::: {.matter matter="mainmatter"}', 1, true))
+  end)
+
+  it("emits the matter marker for {backmatter}", function()
+    local out = run("{backmatter}\n")
+    assert.is_truthy(out:find('::: {.matter matter="backmatter"}', 1, true))
+  end)
+
+  it("emits ::: {.insert insert=\"index\"} for {index}", function()
+    local out = run("{index}\n")
+    assert.is_truthy(out:find('::: {.insert insert="index"}', 1, true))
+  end)
+
+  local insertion_words = {
+    "half-title", "series-title", "title-page", "copyright", "dedication",
+    "epigraph", "toc", "figures", "tables", "exercise-answers",
+    "quiz-answers", "pagebreak",
+  }
+  for _, word in ipairs(insertion_words) do
+    it("emits its own .insert marker for {" .. word .. "}, word verbatim", function()
+      local out = run("{" .. word .. "}\n")
+      assert.is_truthy(out:find('::: {.insert insert="' .. word .. '"}', 1, true))
+    end)
+  end
+
+  it("emits a self-closing marker, not a wrapper: prose after {index} lands outside the div", function()
+    local lines = run_lines("{index}\n\nProse here.\n")
+    local open_idx, close_idx, prose_idx
+    for idx, line in ipairs(lines) do
+      if line == '::: {.insert insert="index"}' then
+        open_idx = idx
+      elseif line == ":::" and open_idx and not close_idx then
+        close_idx = idx
+      elseif line == "Prose here." then
+        prose_idx = idx
+      end
+    end
+    assert.is_truthy(open_idx)
+    assert.is_truthy(close_idx)
+    assert.is_truthy(prose_idx)
+    -- The closer immediately follows the opener -- nothing is nested inside.
+    assert.equals(open_idx + 1, close_idx)
+    assert.is_true(prose_idx > close_idx)
+  end)
+
+  it("raises on an unrecognized bare word, naming the offender and the real fault", function()
+    local ok, err = pcall(run, "{nonsense}\n")
+    assert.is_false(ok)
+    local msg = tostring(err)
+    assert.is_truthy(msg:find("nonsense", 1, true))
+    -- Naming the fault matters as much as naming the word. Reported through
+    -- the generic unclaimed-list path this read "attribute list precedes no
+    -- element it can apply to", which sends an author who typed {indx} to
+    -- look at the placement of a line that is merely misspelled.
+    assert.is_truthy(msg:find("unrecognized directive", 1, true))
+  end)
+
+  it("downgrades an unrecognized bare word under --lenient, preserving the line", function()
+    local out = table.concat(blocks.transform(
+      scanner.scan("{nonsense}\n"), lenient_cfg(), "f.md"), "\n")
+    assert.is_truthy(out:find("{nonsense}", 1, true))
+    assert.is_nil(out:find(":::", 1, true))
+  end)
+
+  it("does not transform a directive line inside a fenced code block", function()
+    local out = run("```markua\n{index}\n```\n")
+    assert.is_truthy(out:find("{index}", 1, true))
+    assert.is_nil(out:find(":::", 1, true))
+  end)
+
+  it("recognizes {quiz-answers} without colliding with a future rejection of {quiz}", function()
+    -- Exact-word lookup, not prefix: DIRECTIVES has no "quiz" entry, only
+    -- "quiz-answers", so Task 8's eventual {quiz} rejection cannot be
+    -- short-circuited by this table.
+    local out = run("{quiz-answers}\n")
+    assert.is_truthy(out:find('::: {.insert insert="quiz-answers"}', 1, true))
+  end)
+
+  it("rejects a directive carrying attributes the marker cannot hold", function()
+    -- A marker carries only its bare word (R18), so emitting one and dropping
+    -- the rest silently discards an anchor the book may cross-reference.
+    local ok, err = pcall(run, "{pagebreak, id: lost}\n")
+    assert.is_false(ok)
+    local msg = tostring(err)
+    assert.is_truthy(msg:find("pagebreak", 1, true))
+    assert.is_truthy(msg:find("id", 1, true))
+  end)
+
+  it("names a class and a keyval on a directive line too", function()
+    local ok, err = pcall(run, "{index, class: x, title: y}\n")
+    assert.is_false(ok)
+    local msg = tostring(err)
+    assert.is_truthy(msg:find(".x", 1, true))
+    assert.is_truthy(msg:find("title", 1, true))
+  end)
+
+  it("keeps the author's directive line intact under --lenient", function()
+    local out = table.concat(blocks.transform(
+      scanner.scan("{pagebreak, id: lost}\n"), lenient_cfg(), "f.md"), "\n")
+    assert.is_truthy(out:find("{pagebreak, id: lost}", 1, true))
+    assert.is_nil(out:find("insert=", 1, true))
+  end)
+end)
+
+-- An attribute line inside a fenced {blurb}/{aside} body is subject to the
+-- same unknown-construct rule as one at the top level. Emitting it verbatim
+-- meant the identical line meant two different things depending on where it
+-- sat -- a hard error outside a callout, literal braces inside one.
+describe("blocks.transform attribute lines inside a fenced body", function()
+  it("rejects an unknown construct inside a {blurb} body instead of emitting braces", function()
+    local ok, err = pcall(run, "{blurb, class: tip}\n{nonsense}\n{/blurb}\n")
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("nonsense", 1, true))
+  end)
+
+  it("rejects one inside an {aside} body the same way", function()
+    local ok = pcall(run, "{aside}\n{nonsense}\n{/aside}\n")
+    assert.is_false(ok)
+  end)
+
+  it("still passes an index marker through, since inline.transform owns it", function()
+    local out = run('{blurb, class: tip}\n{ix: "B-tree"}\nB-trees are fast.\n{/blurb}\n')
+    assert.is_truthy(out:find('{ix: "B-tree"}', 1, true))
+    assert.is_truthy(out:find("::: {.tip .blurb}", 1, true))
+  end)
+
+  it("leaves an attribute-shaped line inside a nested code fence alone", function()
+    -- Fence-awareness outranks the rule above: inside a code sample the line
+    -- is not Markua at all.
+    local out = run("{blurb, class: tip}\n```json\n{\"class\": \"tip\"}\n```\n{/blurb}\n")
+    assert.is_truthy(out:find('{"class": "tip"}', 1, true))
+  end)
+
+  it("refuses a RECOGNIZED directive inside a {blurb} body rather than nesting a marker", function()
+    -- The narrowing is deliberate and worth pinning separately from the
+    -- unknown-word case: {pagebreak} IS in DIRECTIVES, so the easy path
+    -- would be to emit its marker here. What a directive means inside a
+    -- callout body is undecided, and emitting a marker would invent that
+    -- semantic silently rather than surfacing the question.
+    local ok, err = pcall(run, "{blurb, class: tip}\n{pagebreak}\n{/blurb}\n")
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("pagebreak", 1, true))
+  end)
+
+  it("refuses a recognized directive inside an {aside} body the same way", function()
+    local ok, err = pcall(run, "{aside}\n{pagebreak}\n{/aside}\n")
+    assert.is_false(ok)
+    local msg = tostring(err)
+    assert.is_truthy(msg:find("pagebreak", 1, true))
+    assert.is_nil(msg:find("insert=", 1, true))
   end)
 end)
 ```
@@ -2641,52 +3475,243 @@ Create `src/markua/blocks.lua`:
 
 ```lua
 --- Block-level Markua to pandoc-markdown rewrites.
+--
+-- Handles the block-level constructs Markua layers on top of CommonMark: the
+-- pending attribute-list lifecycle every construct below binds into, blurbs
+-- and asides (each with a run-of-lines form and a fenced form), the eight
+-- documented blurb sugar prefixes, and the closed set of bare-word matter and
+-- insertion directives.
+--
+-- Blurbs (`B>` runs and `{blurb, class: X} ... {/blurb}`) and asides (`A>`
+-- runs and `{aside} ... {/aside}`) share their consume-until-close loop and
+-- class-resolution machinery, but differ in two ways. A bare blurb defaults
+-- to callout class `information` (R4); a bare aside has no callout-class
+-- default at all (R11) and stays a plain `::: {.aside}`. And a pending
+-- attribute list ahead of an `A>` run is APPLIED, while one ahead of a fenced
+-- `{aside}` opener is REJECTED -- mirroring the fenced `{blurb}` prohibition
+-- (KTD7).
+--
+-- The eight documented sugar prefixes (C/D/E/I/Q/T/W/X>) share one dispatch
+-- with `B>` itself, table-driven (KTD10) since Lua patterns have no
+-- alternation. A pending attribute list's explicit class overrides a
+-- prefix's implied one rather than conflicting with it, reported as a
+-- warning rather than a hard error when the two disagree (KTD10a).
+--
+-- Bare-word directives (the `DIRECTIVES` table below) each lower to a
+-- self-closing marker, ahead of the generic "unclaimed attribute list"
+-- fallback this pass uses last -- a bare word outside that table, e.g.
+-- "nonsense", falls through to that fallback and is rejected exactly as any
+-- other unrecognized list is. `frontmatter` rides the `matter` family even
+-- though the spec calls the directive nonexistent and asks a Processor to
+-- ignore it (KTD5) -- emitting an inert marker *is* ignoring it while
+-- preserving the author's intent for a downstream filter. `pagebreak` rides
+-- `insert` alongside the front-/back-matter insertion directives rather than
+-- getting a marker family of its own, since a third family with one member
+-- buys nothing (KTD4).
 local attributes = require("src.markua.attributes")
 local config = require("src.markua.config")
 local errors = require("src.markua.errors")
 
 local M = {}
 
-local MATTER = { frontmatter = true, mainmatter = true, backmatter = true }
-
+-- Strip a construct's line prefix and the one space Markua allows after it
+-- ("B> text" and "B>text" both mean the same body). Shared by every prefixed
+-- construct (B>, A>, and the eight sugar prefixes), so the one-space rule
+-- lives in one place.
 local function strip_prefix(text, prefix)
   local body = text:sub(#prefix + 1)
   return (body:gsub("^ ", ""))
 end
 
--- Pull the callout class out of a pending attribute list, validating it.
--- A list may legitimately carry decorative classes alongside the callout one
--- ({.wide, class: tip}), so every class is considered before rejecting.
-local function callout_class(pending, cfg, file, line)
-  if #pending.classes == 0 then
-    return nil
+-- Sugar prefix -> implied callout class (R5). `B` carries no implied class of
+-- its own: it is the general blurb form, falling back to a pending list's
+-- class or, absent one, R4's `information` default. Every other prefix names
+-- the class Markua 0.30 documents for it. Table-driven rather than a branch
+-- chain (KTD10) -- Lua patterns have no alternation, and scanner.lua and
+-- config.lua both already hold their own alternatives as data, not a chain of
+-- `elseif`s.
+local BLURB_PREFIXES = {
+  { prefix = "B>", class = nil },
+  { prefix = "C>", class = "center" },
+  { prefix = "D>", class = "discussion" },
+  { prefix = "E>", class = "error" },
+  { prefix = "I>", class = "information" },
+  { prefix = "Q>", class = "question" },
+  { prefix = "T>", class = "tip" },
+  { prefix = "W>", class = "warning" },
+  { prefix = "X>", class = "exercise" },
+}
+
+-- Which entry (if any) opens `text` as a blurb run. A loop over the table
+-- above, for the same reason the table exists: Lua's patterns cannot
+-- alternate, so this cannot collapse into one combined pattern.
+local function find_blurb_prefix(text)
+  for _, entry in ipairs(BLURB_PREFIXES) do
+    if text:sub(1, #entry.prefix) == entry.prefix then
+      return entry
+    end
   end
-  for _, c in ipairs(pending.classes) do
-    if config.is_callout_class(cfg, c) then
+  return nil
+end
+
+-- Enrich an unknown-class error with the registered spelling when the two
+-- differ only by letter case (KTD8). Matching itself stays case-sensitive --
+-- this never changes which class resolves, only what an author sees when
+-- they typed the wrong case.
+local function known_spelling(name, cfg)
+  local lower = name:lower()
+  for _, c in ipairs(cfg.callout_classes) do
+    if c ~= name and c:lower() == lower then
       return c
     end
   end
-  errors.raise(file, line,
-    "unknown callout class '" .. table.concat(pending.classes, "', '") .. "'")
+  return nil
 end
 
--- An attribute list holding only index keys belongs to inline.transform, which
--- runs after this pass. Re-emit it untouched rather than treating it as a
--- pending block attribute, or a standalone {ix: "term"} line would surface as
--- literal text in the finished book.
+-- Scan a class list for the one registered callout class. Per KTD10b, a
+-- Markua attribute list is key-value only -- every class, callout or
+-- decorative, arrives through one `class:` value that attributes.parse
+-- splits on whitespace -- so there is no shorthand to distinguish intent by,
+-- and a membership scan is the whole rule. Returns the callout class plus
+-- every other class in source order (R8, the decorative-class case); reports
+-- when none of the classes is registered (R6).
+--
+-- Reporting rather than raising is deliberate. AGENTS.md makes an unknown
+-- construct a hard error that `--lenient` downgrades to a warning, and an
+-- unregistered class is exactly that; the reference this pass started from
+-- used an unconditional raise, which left `--lenient` able to recover from an
+-- unclaimed attribute list but not from a bad class. That asymmetry defeats
+-- leniency for its documented job -- triaging a manuscript whose classes do
+-- not match this book's list, which is the common case, since real Leanpub
+-- builds reject `note` and books narrow the set further. Under leniency the
+-- author's own first class becomes the head, so their text survives into the
+-- output the same way reject_pending preserves an unclaimed list.
+local function resolve_callout_class(classes, cfg, file, line)
+  for idx, c in ipairs(classes) do
+    if config.is_callout_class(cfg, c) then
+      local decoratives = {}
+      for j, other in ipairs(classes) do
+        if j ~= idx then
+          decoratives[#decoratives + 1] = other
+        end
+      end
+      return c, decoratives
+    end
+  end
+  local hint = ""
+  for _, c in ipairs(classes) do
+    local known = known_spelling(c, cfg)
+    if known then
+      hint = " (classes are case-sensitive; did you mean '" .. known .. "'?)"
+      break
+    end
+  end
+  -- FIX 4: the lenient recovery below adopts the author's own first class as
+  -- the div's head so their text survives -- but open_div runs that head
+  -- through attributes.check_name before emitting, which raises
+  -- UNCONDITIONALLY on a name pandoc's attribute grammar cannot represent
+  -- (e.g. "3bad"). A class that is BOTH unregistered AND unrepresentable
+  -- therefore still aborted under --lenient before this check existed,
+  -- reintroducing the exact strict/lenient asymmetry the comment above
+  -- already fixed once for the plain-unknown-class case. is_valid_name is
+  -- the non-raising sibling of check_name (attributes.lua) that lets this
+  -- function ask the question instead of finding out by crashing.
+  local head = classes[1]
+  local representable = head ~= nil and attributes.is_valid_name("class", head)
+  local message = "unknown callout class '" .. table.concat(classes, "', '") .. "'" .. hint
+  if not representable then
+    -- Name both faults in one message: an author staring at "'3bad' unknown"
+    -- alone, after the div silently became .information instead of .3bad,
+    -- would go looking for a registration problem and never find the real
+    -- one -- that the class can't be spelled in pandoc's attribute syntax at
+    -- all, registered or not.
+    message = "unknown and unrepresentable callout class '" .. table.concat(classes, "', '") .. "'" .. hint
+  end
+  errors.report(cfg, file, line, message)
+  if not representable then
+    -- Same shape callout_classes({}, ...) returns for an empty class list:
+    -- no decoratives, since an unrepresentable name cannot ride along as one
+    -- either -- it would hit the identical check_name raise one slot later.
+    --
+    -- Returning nil rather than "information" leaves the fallback class to
+    -- the caller, because the two constructs disagree on what it should be:
+    -- a blurb defaults to `information` (R4), while a bare aside carries no
+    -- callout class at all (R11). Answering "information" here for both gave
+    -- a recovered aside `::: {.information .aside}`, which the callout filter
+    -- then styles as a blurb -- turning a lenient recovery into wrong output
+    -- rather than merely degraded output.
+    return nil, {}
+  end
+  local decoratives = {}
+  for j = 2, #classes do
+    decoratives[#decoratives + 1] = classes[j]
+  end
+  return head, decoratives
+end
+
+-- A B> run or fenced opener with no explicit class defaults to `information`
+-- (R4); an empty class list never reaches resolve_callout_class, so the
+-- default never has an unresolvable line/file to report against.
+local function callout_classes(classes, cfg, file, line)
+  if #classes == 0 then
+    return "information", {}
+  end
+  local head, decoratives = resolve_callout_class(classes, cfg, file, line)
+  -- A nil head is the lenient unrepresentable-class recovery declining to
+  -- pick a fallback (see resolve_callout_class). A blurb's is `information`,
+  -- the same default an empty class list takes (R4).
+  if head == nil then
+    return "information", {}
+  end
+  return head, decoratives
+end
+
+-- Bare-word directive -> which self-closing marker family it emits (R14,
+-- R15). One table, not two, so the whole recognized set is enumerable in one
+-- place -- that is what makes R19's hard error trustworthy: a caller can see
+-- every legal bare word by reading this table rather than reconciling two.
+--
+-- `frontmatter` is listed under "matter" even though spec.txt:2288 says the
+-- directive "does not exist" and a Processor "should ignore it if it is
+-- encountered": real manuscripts write it anyway, and the spec's own remedy
+-- is to ignore rather than reject. Emitting an inert marker *is* ignoring it
+-- while preserving the author's intent for a downstream filter (KTD5).
+--
+-- `pagebreak` is listed under "insert" rather than getting a marker family of
+-- its own: spec.txt:2219 groups it with neither the structural pair nor the
+-- two closed insertion lists, but it inserts something at a point, which is
+-- what `.insert` already means, and a third family with one member buys
+-- nothing (KTD4).
+local DIRECTIVES = {
+  mainmatter = "matter",
+  backmatter = "matter",
+  frontmatter = "matter",
+  pagebreak = "insert",
+  ["half-title"] = "insert",
+  ["series-title"] = "insert",
+  ["title-page"] = "insert",
+  copyright = "insert",
+  dedication = "insert",
+  epigraph = "insert",
+  toc = "insert",
+  figures = "insert",
+  tables = "insert",
+  index = "insert",
+  ["exercise-answers"] = "insert",
+  ["quiz-answers"] = "insert",
+}
+
+-- An attribute list holding only index keys belongs to inline.transform,
+-- which runs after this pass. Re-emit it untouched rather than treating it
+-- as a pending block attribute, or a standalone {ix: "term"} line would
+-- surface as literal text in the finished book.
 local function is_index_only(parsed, cfg)
   if parsed.id or #parsed.classes > 0 or #parsed.bare > 0 then
     return false
   end
   local count = 0
   for key in pairs(parsed.keyvals) do
-    local known = false
-    for _, index_key in ipairs(cfg.index_keys) do
-      if key == index_key then
-        known = true
-      end
-    end
-    if not known then
+    if not config.is_index_key(cfg, key) then
       return false
     end
     count = count + 1
@@ -2697,7 +3722,6 @@ end
 function M.transform(lines, cfg, file)
   local out = {}
   local pending = nil        -- attribute list awaiting its element
-  local pending_line = nil
   local pending_text = nil   -- the raw line, for verbatim re-emission
   local i = 1
 
@@ -2705,134 +3729,453 @@ function M.transform(lines, cfg, file)
     out[#out + 1] = s
   end
 
-  -- A body line that is exactly ":::" or "$$" would close the fence this pass
-  -- just opened, desynchronizing every block after it. pandoc's own markdown
-  -- writer backslash-escapes such a line (a ":::" paragraph inside a div is
-  -- written "\\:::" and reads back identically), so do the same. Erroring here
-  -- would reject documents pandoc itself handles without complaint.
+  -- A body line beginning with a run of 3+ colons opens or closes a fenced
+  -- div in pandoc's own grammar REGARDLESS of what follows the colons on
+  -- that line -- verified against the reader's exact TARGET_FORMAT:
+  -- ":::text" (no space, no braces) opens a div named "text" exactly like
+  -- ":::" alone closes whichever one is open. A bare-":::" match alone (FIX
+  -- 2) therefore missed the far more common author shape "::: {.example}":
+  -- that line opened a real NESTED Div this pass never intended, and the
+  -- construct's own generated closer then closed the INNER div instead of
+  -- the one this pass opened, leaving everything after it swallowed into
+  -- the outer div with a "closing implicitly" warning at EOF -- silent
+  -- structural corruption, not merely misplaced text. So every line whose
+  -- content starts with ":::" is escaped here, not only a bare colon run.
+  --
+  -- This does NOT imitate pandoc's own markdown writer: writing a real
+  -- nested Div back out, pandoc WIDENS the outer fence to "::::" rather than
+  -- escaping the inner one (confirmed with `pandoc -f <TARGET_FORMAT> -t
+  -- markdown` against a nested-div AST). Widening is the writer's fix for a
+  -- Div node it already knows is nested; it has no bearing here, because
+  -- this pass is not rendering a Div -- it is passing through a line of an
+  -- author's prose that happens to be ":::"-shaped. The actual reason to
+  -- escape it is narrower and unrelated to that writer behavior: an
+  -- author's literal ":::"-shaped body line must not be able to open or
+  -- close a div this pass generates elsewhere in the same document.
+  --
+  -- "$$" gets the same treatment for the same underlying reason -- it is a
+  -- display-math delimiter this pass emits elsewhere -- but stays bare-only
+  -- (`^%s*%$%$%s*$`, not widened to "anything starting with $$"): unlike
+  -- ":::", pandoc's tex_math_dollars syntax has no attribute-string form
+  -- that turns "$$ something" into a different construct, so there is
+  -- nothing analogous to ":::{.class}" for "$$" to collide with.
   local function emit_body(s)
-    if s:match("^%s*:::+%s*$") or s:match("^%s*%$%$%s*$") then
+    if s:match("^%s*:::+") or s:match("^%s*%$%$%s*$") then
       emit((s:gsub("^(%s*)", "%1\\", 1)))
     else
       emit(s)
     end
   end
 
-  -- The callout class MUST be the head of the class list. pandoc's DocBook
-  -- writer matches only the first class (`(l:_) | l `elem` admonitions`), so
-  -- "{.blurb .tip}" degrades to a bare <para> with no error anywhere, while
-  -- "{.tip .blurb}" becomes a real <tip>. This head-class-plus-marker shape is
-  -- what pandoc's DocBook and GitHub-alert readers both produce, so the same
-  -- downstream filter serves callouts from any of the three sources.
-  local function open_callout(class)
-    emit("::: {." .. class .. " .blurb}")
+  -- The callout class MUST be the head of the class list, and `.blurb` /
+  -- `.aside` MUST be last: pandoc's DocBook writer matches only the first
+  -- class (`(l:_) | l `elem` admonitions`), so "{.blurb .tip}" degrades to a
+  -- bare <para> with no error anywhere, while "{.tip .blurb}" becomes a real
+  -- <tip>. Decorative classes ride between the two, in the source order the
+  -- author wrote them (R8) -- the reference this pass started from resolved
+  -- one callout class and silently dropped every other one, which this
+  -- fixes by taking the whole list instead of a single resolved name.
+  --
+  -- `id`, when given, leads the attribute block as `#id` -- the shape
+  -- `attributes.to_pandoc_attr` already uses, and one the pandoc oracle
+  -- confirms sets the Div's identifier identically to a Markua `id:` key
+  -- rendered as `id="..."`. Every caller of this function threads one
+  -- through: the sugar-prefix branch below, the A> branch and fenced
+  -- {aside} branch via open_aside, and the fenced {blurb} branch directly
+  -- (FIX 5) -- an `id:` on any of the five construct paths reaches its div
+  -- rather than silently losing the cross-reference anchor on three of them.
+  --
+  -- `head` and every entry of `decoratives`, plus `id` when given, are
+  -- validated through attributes.check_name before anything is emitted --
+  -- the same check attributes.to_pandoc_attr already applies to every id and
+  -- class it renders. This path builds its own `::: {...}` text directly
+  -- rather than going through to_pandoc_attr, so it must call that
+  -- validation itself: without it, an author's `{class: "tip 3bad"}` reaches
+  -- pandoc.read as `::: {.tip .3bad .blurb}`, and pandoc rejects the WHOLE
+  -- attribute block on the illegal class, destroying the blurb and leaking
+  -- literal braces into the finished book -- exactly the failure AGENTS.md's
+  -- "never pass through as literal braces" rule forbids. check_name raises
+  -- unconditionally rather than going through errors.report, matching its
+  -- own behavior inside to_pandoc_attr: an id or class pandoc's attribute
+  -- syntax cannot represent is a "cannot be rendered" fault, not an
+  -- "unrecognized Markua construct" one that --lenient is meant to downgrade.
+  --
+  -- `marker` is never validated: it is always one of this module's own
+  -- literals ("blurb" / "aside"), never author input.
+  local function open_div(head, decoratives, marker, id, line)
+    if id then
+      attributes.check_name("id", id, file, line)
+    end
+    attributes.check_name("class", head, file, line)
+    for _, c in ipairs(decoratives) do
+      attributes.check_name("class", c, file, line)
+    end
+    local parts = {}
+    if id then
+      parts[#parts + 1] = "#" .. id
+    end
+    parts[#parts + 1] = "." .. head
+    for _, c in ipairs(decoratives) do
+      parts[#parts + 1] = "." .. c
+    end
+    parts[#parts + 1] = "." .. marker
+    emit("::: {" .. table.concat(parts, " ") .. "}")
   end
 
-  -- Nothing may consume an attribute list and quietly forget it. Every exit
-  -- from the pending state goes through here, so an unclaimed list aborts with
-  -- its own line number instead of leaking braces into the book or vanishing.
+  -- Unlike a blurb, a bare aside has no callout-class default: `A>` alone
+  -- and an empty `{aside}` both emit exactly `::: {.aside}` (R11, R12) --
+  -- Task 11's downstream filter and issue #6's table expect that bare
+  -- shape, so there is no `information` fallback to reach for here the way
+  -- callout_classes gives blurbs. A non-empty class list resolves through
+  -- the same resolve_callout_class a blurb's does, so a bad class raises
+  -- identically in both constructs (KTD7).
+  --
+  -- `id`, when given, is threaded through to open_div in the non-empty-class
+  -- branch, and validated and emitted directly in the bare-`::: {.aside}`
+  -- branch (FIX 5) -- an `id:` above an `A>` run or a fenced `{aside}` no
+  -- longer vanishes the way it did before this function accepted one.
+  local function open_aside(classes, line, id)
+    if not classes or #classes == 0 then
+      if id then
+        attributes.check_name("id", id, file, line)
+        emit("::: {#" .. id .. " .aside}")
+      else
+        emit("::: {.aside}")
+      end
+    else
+      local head, decoratives = resolve_callout_class(classes, cfg, file, line)
+      if head == nil then
+        -- Lenient recovery declined to pick a fallback class. An aside's is
+        -- no callout class at all (R11), not the blurb's `information`, so
+        -- recover to the same bare shape an aside with no attribute list
+        -- takes -- keeping any id the author did supply.
+        open_aside(nil, line, id)
+      else
+        open_div(head, decoratives, "aside", id, line)
+      end
+    end
+  end
+
+  -- Consume lines up to (not including) the fenced closer for `marker`,
+  -- shared by the {blurb} and {aside} fenced forms (R3, R12): a code sample
+  -- inside the body can legitimately contain the closing text, so only a
+  -- matching line OUTSIDE a fence terminates the construct (R10), and the
+  -- closer word is taken from `marker` rather than hardcoded so this one
+  -- loop can never let a {blurb} div wait on {/aside} or vice versa.
+  local function consume_until_close(marker, opened_at)
+    local closer = "^%s*{/" .. marker .. "}%s*$"
+    i = i + 1
+    while i <= #lines and not (not lines[i].in_code and lines[i].text:match(closer)) do
+      -- FIX 3: a code sample nested inside this fenced form can legitimately
+      -- contain a ":::"-shaped line (AGENTS.md's fence-awareness rule --
+      -- content inside a fenced code block is never Markua). The closer
+      -- check above already branches on `in_code`; emission must match it,
+      -- or a code line reaches emit_body and gets a spurious backslash
+      -- escape injected into what the author wrote verbatim.
+      if lines[i].in_code then
+        emit(lines[i].text)
+      elseif attributes.is_attribute_line(lines[i].text) then
+        -- A body line is not exempt from the unknown-construct rule. Emitting
+        -- it verbatim let `{nonsense}` inside a blurb reach the book as
+        -- literal braces, while the identical line one level up raised --
+        -- the same input silently meaning two different things depending on
+        -- where it sat. Index markers are the one attribute line that
+        -- legitimately passes through here, because inline.transform runs
+        -- after this pass and owns them (R23).
+        --
+        -- Everything else is refused rather than interpreted: what a nested
+        -- directive or a second attribute list should MEAN inside a callout
+        -- body is undecided, and inventing a nesting semantic to avoid an
+        -- error would be a worse answer than saying so.
+        local body_parsed = attributes.parse(lines[i].text, file, lines[i].number)
+        if is_index_only(body_parsed, cfg) then
+          emit(lines[i].text)
+        else
+          errors.report(cfg, file, lines[i].number, string.format(
+            "an attribute list other than an index marker is not supported inside a {%s} body: %s",
+            marker, lines[i].text))
+          emit(lines[i].text)   -- lenient only; preserve the author's line
+        end
+      else
+        emit_body(lines[i].text)
+      end
+      i = i + 1
+    end
+    if i > #lines then
+      -- R9/R12: a block running silently to end of input is exactly what
+      -- this guards against. Position the error at the opener, not here,
+      -- since "here" is past the last line an author can point to.
+      errors.raise(file, opened_at, "unclosed {" .. marker .. "} opened here")
+    end
+    emit(":::")
+    i = i + 1
+  end
+
+  -- Consume every consecutive line sharing `prefix`, emitting each one's body
+  -- through emit_body, then close with ":::". Shared by the A> branch and the
+  -- blurb-prefix branch below -- both open their div first, then hand off
+  -- here to swallow their own run and close it. "A>" is a fixed literal, so
+  -- `text:match("^A>")` (the run's opening condition) and the `sub`-based
+  -- comparison this loop uses are equivalent for it; using `sub` uniformly
+  -- means one implementation serves every prefix, fixed or table-driven
+  -- alike. Advances `i` on its own, past every line it consumes, exactly
+  -- like consume_until_close above.
+  local function consume_prefixed_run(prefix)
+    while i <= #lines and lines[i].text:sub(1, #prefix) == prefix do
+      emit_body(strip_prefix(lines[i].text, prefix))
+      i = i + 1
+    end
+    emit(":::")
+  end
+
+  -- Nothing may see a pending attribute list and quietly forget it. Every
+  -- exit from the pending state goes through here, so an unclaimed list
+  -- aborts with its own line number instead of leaking braces into the book
+  -- or vanishing (R21). Called as the FIRST action of any branch that does
+  -- not consume the pending list itself -- the branches that do consume it
+  -- (the heading attach, and the B>, A>, and sugar-prefix branches) are
+  -- untouched by this rule.
   local function reject_pending(reason)
     if not pending then
       return
     end
     local text = pending_text
-    errors.report(cfg, file, pending_line,
+    errors.report(cfg, file, pending.line,
       (reason or "attribute list applies to nothing") .. ": " .. text)
-    -- Only reached when cfg.strict is false. Re-emit verbatim: leniency should
-    -- preserve the author's text, never silently delete it.
+    -- Only reached when cfg.strict is false. Re-emit verbatim, at the
+    -- position of the line that disqualified it: leniency preserves the
+    -- author's text and never reorders or deletes it (R22). Resolving this
+    -- in the same loop iteration as the disqualifying line -- rather than
+    -- tracking and rewriting an output index -- is what keeps that true
+    -- without bookkeeping: the append lands here, before whatever that line
+    -- goes on to emit.
     emit(text)
-    pending, pending_line, pending_text = nil, nil, nil
+    pending, pending_text = nil, nil
   end
 
   while i <= #lines do
     local rec = lines[i]
     local text = rec.text
+    local blurb_prefix = find_blurb_prefix(text)
 
     if rec.in_code then
+      -- A pending list does not survive a fence: without this, {class: tip}
+      -- above a fenced code sample silently jumps the fence and binds to
+      -- whatever construct follows it, so a W> after the fence renders as a
+      -- tip -- wrong class, no error, in strict mode (FIX 1). This is the
+      -- only branch in the dispatch that neither consumes `pending` nor
+      -- rejects it; every other non-consuming branch calls reject_pending as
+      -- its first action, per that function's own comment.
+      reject_pending("attribute list precedes a fenced code block")
       emit(text)
       i = i + 1
 
     elseif attributes.is_attribute_line(text) then
       local parsed = attributes.parse(text, file, rec.number)
 
-      if #parsed.bare == 1 and MATTER[parsed.bare[1]] then
-        emit("::: {.matter matter=\"" .. parsed.bare[1] .. "\"}")
-        emit(":::")
-        i = i + 1
-      elseif #parsed.bare == 1 and parsed.bare[1] == "blurb" then
-        -- Fenced blurb: consume until {/blurb}
-        local class = callout_class(parsed, cfg, file, rec.number) or "information"
-        open_callout(class)
-        i = i + 1
-        -- A code example inside the blurb can legitimately contain {/blurb};
-        -- only a line outside a fence terminates it.
-        local function is_blurb_end(r)
-          return not r.in_code and r.text:match("^%s*{/blurb}%s*$") ~= nil
-        end
-        while i <= #lines and not is_blurb_end(lines[i]) do
-          emit_body(lines[i].text)
-          i = i + 1
-        end
-        if i > #lines then
-          errors.raise(file, rec.number, "unclosed {blurb}")
-        end
-        emit(":::")
-        i = i + 1
-      elseif is_index_only(parsed, cfg) then
+      if is_index_only(parsed, cfg) then
         reject_pending()
         emit(text)                     -- verbatim; inline.transform owns it
         i = i + 1
+      elseif #parsed.bare == 1 and parsed.bare[1] == "blurb" then
+        -- Fenced form: {blurb, class: X} ... {/blurb}. A pending list on the
+        -- line above this opener is illegal per R13a (spec.txt:6647-6656),
+        -- so it is rejected first, before anything of this branch's own is
+        -- emitted -- exactly the rule reject_pending's own comment describes
+        -- for every branch that does not consume the pending list.
+        reject_pending("attribute list may not precede a fenced {blurb} opener")
+        local head, decoratives = callout_classes(parsed.classes, cfg, file, rec.number)
+        -- FIX 5: `id:` lands in parsed.keyvals.id (attributes.parse's home
+        -- for Markua's own id syntax); parsed.id is only ever set by the
+        -- `#id` shorthand pandoc uses and Markua's fenced-opener syntax does
+        -- not. Checking both, as the sugar-prefix branch below already does,
+        -- means the fenced {blurb, id: s} ... {/blurb} form produces the
+        -- identical div the plan's R3 requires instead of dropping the
+        -- anchor.
+        open_div(head, decoratives, "blurb", parsed.id or parsed.keyvals.id, rec.number)
+        consume_until_close("blurb", rec.number)
+      elseif #parsed.bare == 1 and parsed.bare[1] == "aside" then
+        -- Fenced form: {aside, class: X} ... {/aside}. Sibling of the {blurb}
+        -- branch above -- a preceding list is illegal here too (R13a,
+        -- KTD7), rejected before this branch emits anything of its own --
+        -- but open_aside (unlike callout_classes) has no default class to
+        -- fall back to when parsed.classes is empty (R12).
+        reject_pending("attribute list may not precede a fenced {aside} opener")
+        open_aside(parsed.classes, rec.number, parsed.id or parsed.keyvals.id)  -- FIX 5
+        consume_until_close("aside", rec.number)
+      elseif #parsed.bare == 1 and DIRECTIVES[parsed.bare[1]] then
+        -- Bare-word directive. A pending list does not bind to a directive
+        -- line -- mirroring the fenced {blurb}/{aside} prohibition (R13a) --
+        -- so it is rejected first, exactly like every other branch that does
+        -- not consume the pending list itself; a leftover {class: X} above
+        -- {pagebreak} raises instead of silently vanishing.
+        reject_pending("attribute list does not precede a directive")
+        local word = parsed.bare[1]
+        local kind = DIRECTIVES[word]
+        -- A directive marker carries only its bare word (R18), so any other
+        -- attribute on the line has nowhere to go. Emitting the marker and
+        -- dropping the rest silently loses author intent -- `{pagebreak,
+        -- id: lost}` would discard an anchor another part of the book
+        -- cross-references. Report instead, so strict aborts and --lenient
+        -- keeps the author's line intact rather than a lossy marker.
+        local extras = {}
+        if parsed.id then
+          extras[#extras + 1] = "#" .. parsed.id
+        end
+        for _, c in ipairs(parsed.classes) do
+          extras[#extras + 1] = "." .. c
+        end
+        local keys = {}
+        for k in pairs(parsed.keyvals) do
+          keys[#keys + 1] = k
+        end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+          extras[#extras + 1] = k
+        end
+        if #extras > 0 then
+          errors.report(cfg, file, rec.number, string.format(
+            "the %s directive takes no other attributes, but this line carries %s",
+            word, table.concat(extras, ", ")))
+          -- Only reached under --lenient: keep the author's line rather than
+          -- a marker that dropped half of what they wrote.
+          emit(text)
+        else
+          -- The class and the attribute key are both the kind; the value is
+          -- the bare word verbatim, so no name is translated anywhere (R18).
+          -- Self-closing, not a wrapper (R16, R17): confirmed against the
+          -- reader's own TARGET_FORMAT that prose following the marker is a
+          -- SIBLING Para, not nested inside an empty Div (KTD3).
+          emit(string.format('::: {.%s %s="%s"}', kind, kind, word))
+          emit(":::")
+        end
+        i = i + 1
+      elseif #parsed.bare == 1 then
+        -- A lone bare word that reached here is not `blurb`, not `aside`,
+        -- and not in DIRECTIVES, so it is an unrecognized directive and
+        -- nothing downstream will claim it (R19). Say that, rather than
+        -- letting it fall through to the generic swap below: that path
+        -- reports "attribute list precedes no element it can apply to",
+        -- which misdescribes a typo like {indx} as a placement problem and
+        -- sends the author looking at the wrong line. Naming the word and
+        -- the real fault is the entire value of the hard error -- a
+        -- misdiagnosing abort is barely better than the silent
+        -- pass-through AGENTS.md forbids. Reported, not raised, so
+        -- `--lenient` still downgrades it like every other unknown
+        -- construct.
+        reject_pending()
+        errors.report(cfg, file, rec.number,
+          "unrecognized directive '" .. parsed.bare[1] .. "'")
+        emit(text)                     -- lenient only; preserve the author's line
+        i = i + 1
       else
+        -- Every other attribute list falls through to this generic swap,
+        -- which is what keeps it from silently binding to whatever line
+        -- happens to follow it (R21).
         reject_pending()               -- a new list may not shadow an unused one
-        pending, pending_line, pending_text = parsed, rec.number, text
+        pending, pending_text = parsed, text
         i = i + 1
       end
-
-    elseif text:match("^B>") then
-      local class = pending and callout_class(pending, cfg, file, pending_line) or "information"
-      open_callout(class)
-      while i <= #lines and lines[i].text:match("^B>") do
-        emit_body(strip_prefix(lines[i].text, "B>"))
-        i = i + 1
-      end
-      emit(":::")
-      pending, pending_line, pending_text = nil, nil, nil
 
     elseif text:match("^A>") then
-      emit("::: {.aside}")
-      while i <= #lines and lines[i].text:match("^A>") do
-        emit_body(strip_prefix(lines[i].text, "A>"))
-        i = i + 1
+      -- A> run: unlike a fenced {aside} opener, a pending list here is
+      -- APPLIED rather than rejected (KTD7) -- open_aside resolves it
+      -- exactly as the fenced form does, falling back to the bare
+      -- `::: {.aside}` shape when no list precedes the run at all (R11).
+      if pending then
+        open_aside(pending.classes, pending.line, pending.id or pending.keyvals.id)  -- FIX 5
+        pending, pending_text = nil, nil
+      else
+        open_aside({}, rec.number)
       end
-      emit(":::")
-      pending, pending_line, pending_text = nil, nil, nil
+      consume_prefixed_run("A>")
+
+    elseif blurb_prefix then
+      -- B> run and the eight sugar prefixes share one path (KTD10): they
+      -- differ only in what class an EMPTY pending list resolves to. A
+      -- pending list carrying its own class always wins over the prefix's
+      -- implied one (KTD10a, R5a) -- the spec's own worked example renders
+      -- {class: tip} above W> as a tip blurb, not a failed conversion -- so
+      -- disagreement between the two is a warning, not a hard error, fired
+      -- only when they actually differ. consume_prefixed_run swallows every
+      -- consecutive line sharing the SAME prefix and closes the div, so --
+      -- unlike the branches below -- it advances `i` on its own and sits
+      -- outside their shared trailing increment.
+      local pending_classes = pending and pending.classes or {}
+      -- Markua's own id syntax is the `id:` key (KTD10b), which
+      -- attributes.parse lands in .keyvals.id; `.id` itself is only ever set
+      -- by the `#id` shorthand pandoc uses and Markua does not. Checking
+      -- both costs nothing and means an id reaches the div regardless of
+      -- which shape produced it.
+      local id = pending and (pending.id or pending.keyvals.id) or nil
+      local head, decoratives, applied_line
+      if #pending_classes > 0 then
+        applied_line = pending.line
+        head, decoratives = callout_classes(pending_classes, cfg, file, applied_line)
+        -- Warn only when the head is a class the AUTHOR actually named. Under
+        -- --lenient an unregistered-and-unrepresentable class resolves to the
+        -- `information` fallback, and reporting that as "explicit class
+        -- 'information' overrides W>'s implied class 'warning'" names a class
+        -- the author never wrote -- a second, contradictory diagnostic on top
+        -- of the accurate one resolve_callout_class already emitted.
+        local head_is_authors = false
+        for _, c in ipairs(pending_classes) do
+          if c == head then
+            head_is_authors = true
+            break
+          end
+        end
+        if head_is_authors and blurb_prefix.class and head ~= blurb_prefix.class then
+          errors.warn(file, applied_line, string.format(
+            "explicit class '%s' overrides %s's implied class '%s'", head, blurb_prefix.prefix, blurb_prefix.class),
+            cfg.sink)
+        end
+      elseif blurb_prefix.class then
+        applied_line = rec.number
+        head, decoratives = blurb_prefix.class, {}
+      else
+        applied_line = rec.number
+        head, decoratives = callout_classes({}, cfg, file, applied_line)
+      end
+      pending, pending_text = nil, nil
+      open_div(head, decoratives, "blurb", id, applied_line)
+      consume_prefixed_run(blurb_prefix.prefix)
 
     else
       if pending and text:match("^#+%s") then
-        -- to_pandoc_attr renders id, classes and keyvals only. An unrecognized
-        -- bare word would vanish into an empty `{}` on the heading, which is
-        -- exactly the silent pass-through the hard-error constraint forbids.
+        -- to_pandoc_attr renders id, classes and keyvals only. An
+        -- unrecognized bare word would vanish into an empty "{}" on the
+        -- heading, which is exactly the silent pass-through the hard-error
+        -- constraint forbids.
         if #pending.bare > 0 then
           reject_pending("unrecognized attribute `" .. pending.bare[1] .. "`")
           emit(text)
         else
-          emit(text .. " " .. attributes.to_pandoc_attr(pending))
-          pending, pending_line, pending_text = nil, nil, nil
+          -- No explicit line: to_pandoc_attr falls back to parsed.line,
+          -- which is the same position pending.line already carries.
+          emit(text .. " " .. attributes.to_pandoc_attr(pending, file))
+          pending, pending_text = nil, nil
         end
-      elseif pending and text:match("^%s*$") then
-        emit(text)   -- keep looking; blank lines do not clear a pending list
       else
-        -- resources.transform already ran, so nothing downstream will claim
-        -- this. Rendering it through to_pandoc_attr would drop bare words and
-        -- leak braces into the output; both are silent corruption.
+        -- Covers plain prose and blank lines; A> lines are handled by their
+        -- own branch above, not here. A blank line no longer holds a
+        -- pending list across it (KTD6): spec.txt:6647 requires the
+        -- attribute list to directly precede its element with no blank line
+        -- between them, so a blank goes through the same rejection as any
+        -- other unclaimed case, not a special case that survives it.
         reject_pending("attribute list precedes no element it can apply to")
-        emit(text)
+        emit_body(text)
       end
       i = i + 1
     end
   end
 
-  -- A list in the final position still applies to nothing.
+  -- A list in the final position still applies to nothing. This is live, not
+  -- a safety net: scanner.scan appends a trailing blank record only when the
+  -- source ends in a newline, so a file whose last line is the attribute list
+  -- and carries no final newline reaches here with `pending` still set. That
+  -- is the one path satisfying R21's "end of input" case, and deleting it as
+  -- unreachable would silently drop the error.
   reject_pending("attribute list at end of input")
 
   return out
@@ -2844,7 +4187,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/blocks_spec.lua`
-Expected: PASS, 12 successes
+Expected: PASS, 100 successes
 
 - [ ] **Step 5: Commit**
 
@@ -3156,10 +4499,25 @@ local KIND_BY_EXT = {
 -- resource attributes is silent data loss -- the index entry disappears into
 -- the image's attribute string, and a fenced blurb whose first body line is a
 -- resource loses its opening marker and leaves {/blurb} unpaired.
+--
+-- MUST stay in sync with blocks.lua's own DIRECTIVES table (plus "blurb" and
+-- "aside", the two fenced-form openers, and "quiz"/"exercise", which blocks.lua
+-- rejects rather than lowers): resources.transform runs BEFORE
+-- blocks.transform, and belongs_to_blocks returns false for any bare word
+-- outside this table. A directive or a fenced-aside opener sitting directly
+-- above an image line would then be claimed as that image's attributes and
+-- vanish silently -- the same failure mode the comment above already
+-- describes for {blurb} and {frontmatter}, just for every word this table
+-- omits.
 local BLOCK_BARE = {
-  blurb = true,
+  blurb = true, aside = true,
   frontmatter = true, mainmatter = true, backmatter = true,
   quiz = true, exercise = true,
+  pagebreak = true,
+  ["half-title"] = true, ["series-title"] = true, ["title-page"] = true,
+  copyright = true, dedication = true, epigraph = true,
+  toc = true, figures = true, tables = true, index = true,
+  ["exercise-answers"] = true, ["quiz-answers"] = true,
 }
 
 local function belongs_to_blocks(parsed)
@@ -3344,7 +4702,7 @@ Expected: FAIL, 3 new failures (math fence unchanged, quizzes not rejected)
 
 - [ ] **Step 3: Implement the minimal code to make the test pass**
 
-In `src/markua/blocks.lua`, add near the top after the `MATTER` table:
+In `src/markua/blocks.lua`, add near the top after the `DIRECTIVES` table:
 
 ```lua
 local OUT_OF_SCOPE = { quiz = true, exercise = true }
@@ -3371,7 +4729,7 @@ Inside `M.transform`, replace the `if rec.in_code then` branch with:
 
 and declare `local math_open = false` alongside `local pending = nil`.
 
-In the attribute-line branch, before the `MATTER` check, add:
+In the attribute-line branch, before the `DIRECTIVES` lookup, add:
 
 ```lua
       for _, word in ipairs(parsed.bare) do
@@ -3385,7 +4743,7 @@ In the attribute-line branch, before the `MATTER` check, add:
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/blocks_spec.lua`
-Expected: PASS, 15 successes
+Expected: PASS, 103 successes
 
 - [ ] **Step 5: Commit**
 
@@ -4114,18 +5472,21 @@ local function style_name(class)
 end
 
 function Div(el)
+  -- Check the head class BEFORE the aside fallback. The reader always puts
+  -- the callout class first and the .blurb/.aside marker last, so a
+  -- callout-classed aside ({.tip .aside}) carries "tip" as its head class
+  -- exactly like a blurb does. Testing .aside first -- as this filter once
+  -- did -- matches before the head class is ever inspected, losing the tip
+  -- and flattening the block to the generic aside style.
+  local head = el.classes[1]
+  if head and head ~= "aside" and head ~= "blurb" then
+    el.attributes["custom-style"] = style_name(head)
+    return el
+  end
+  -- A bare aside ({.aside}, no callout class) has no head class to check.
   if el.classes:includes("aside") then
     el.attributes["custom-style"] = ASIDE_STYLE
     return el
-  end
-  -- The reader marks every blurb with .blurb plus its callout class.
-  if el.classes:includes("blurb") then
-    for _, class in ipairs(el.classes) do
-      if class ~= "blurb" then
-        el.attributes["custom-style"] = style_name(class)
-        return el
-      end
-    end
   end
 end
 ```
@@ -4407,22 +5768,27 @@ Recorded so they are decisions rather than oversights:
 
 ### From the 2026-08-16 spec sweep
 
-- **Insertion directives are unhandled and would abort a real manuscript** — Task 5 (blocks.lua)
+- **RESOLVED — Insertion directives are recognized.** The complete Markua 0.30
+  bare-word directive set — structural (`frontmatter`, `mainmatter`,
+  `backmatter`) and insertion (`pagebreak`, the title-page and front-matter
+  inserts, `toc`, `figures`, `tables`, `index`, `exercise-answers`,
+  `quiz-answers`) — is now recognized. An insertion directive lowers to a
+  self-closing `::: {.insert insert="word"} :::` marker, the bare word carried
+  verbatim. The marker is inert until a filter claims it: no currently-scoped
+  task consumes `.insert`, so lowering it into an actual generated index, TOC,
+  or figure list needs its own task. See
+  `docs/plans/2026-08-16-001-feat-block-constructs-and-directives-plan.md`.
 
-  Markua defines brace-only *insertion directives* that place generated content;
-  `{index}` positions the automatically-generated back-of-book index. Task 5's
-  `MATTER` table recognizes only `frontmatter`, `mainmatter` and `backmatter`, and
-  the Global Constraints make an unrecognized `{...}` attribute line a hard error.
-  A manuscript that places its own index therefore aborts the conversion — in the
-  one tool whose headline feature is carrying index entries into Word.
+- **The fenced `{blockquote}` … `{/blockquote}` form is unhandled and would
+  abort a real manuscript** — Task 5 (blocks.lua)
 
-  Confirmed from the spec source that `{index}` is an insertion directive; the
-  full directive set could not be enumerated, because the manual's section pages
-  return their table of contents rather than the section body. Settle two things
-  before Task 5 ships: the complete directive list, and what each should become.
-  Pandoc has no native node for a generated index, so the likely shape is the
-  self-closing marker `blocks.transform` already emits for matter directives,
-  leaving placement to a filter — but that is a decision, not a default.
+  `spec.txt:6410-6440` documents a fenced blockquote extension in the same
+  tier as the fenced `{blurb}` and `{aside}` forms this plan already handles,
+  but no task in this or the 2026-08-16 plan recognizes it, so a manuscript
+  using it still aborts the conversion. Found by review rather than by either
+  plan's own audit, which is reason to treat the remaining directive-adjacent
+  surface as unaudited rather than clear. Deliberately deferred to its own
+  task.
 
 ### From 2026-08-08 review
 
