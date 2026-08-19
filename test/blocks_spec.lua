@@ -671,6 +671,19 @@ describe("blocks.transform blurb sugar prefixes", function()
     assert.equals(0, #sink.writes)
   end)
 
+  it("does not claim the recovery fallback was an explicit override", function()
+    -- Under --lenient an unregistered-and-unrepresentable class resolves to
+    -- `information`. Reporting that as "explicit class 'information'
+    -- overrides W>'s implied class 'warning'" names a class the author never
+    -- wrote, contradicting the accurate warning already emitted for it.
+    local sink = capturing_sink()
+    local cfg = config.merge(config.defaults(), { strict = false, sink = sink })
+    run('{class: "3bad"}\nW> hi\n', cfg)
+    local joined = table.concat(sink.writes, "\n")
+    assert.is_truthy(joined:find("3bad", 1, true))
+    assert.is_nil(joined:find("overrides", 1, true))
+  end)
+
   it("carries an {id: sidebar} pending list's id onto a sugar prefix's div, keeping its class", function()
     -- A list with no class overrides nothing: `tip` still comes from the
     -- prefix, but the id rides along.
@@ -771,5 +784,60 @@ describe("blocks.transform directives", function()
     -- short-circuited by this table.
     local out = run("{quiz-answers}\n")
     assert.is_truthy(out:find('::: {.insert insert="quiz-answers"}', 1, true))
+  end)
+
+  it("rejects a directive carrying attributes the marker cannot hold", function()
+    -- A marker carries only its bare word (R18), so emitting one and dropping
+    -- the rest silently discards an anchor the book may cross-reference.
+    local ok, err = pcall(run, "{pagebreak, id: lost}\n")
+    assert.is_false(ok)
+    local msg = tostring(err)
+    assert.is_truthy(msg:find("pagebreak", 1, true))
+    assert.is_truthy(msg:find("id", 1, true))
+  end)
+
+  it("names a class and a keyval on a directive line too", function()
+    local ok, err = pcall(run, "{index, class: x, title: y}\n")
+    assert.is_false(ok)
+    local msg = tostring(err)
+    assert.is_truthy(msg:find(".x", 1, true))
+    assert.is_truthy(msg:find("title", 1, true))
+  end)
+
+  it("keeps the author's directive line intact under --lenient", function()
+    local out = table.concat(blocks.transform(
+      scanner.scan("{pagebreak, id: lost}\n"), lenient_cfg(), "f.md"), "\n")
+    assert.is_truthy(out:find("{pagebreak, id: lost}", 1, true))
+    assert.is_nil(out:find("insert=", 1, true))
+  end)
+end)
+
+-- An attribute line inside a fenced {blurb}/{aside} body is subject to the
+-- same unknown-construct rule as one at the top level. Emitting it verbatim
+-- meant the identical line meant two different things depending on where it
+-- sat -- a hard error outside a callout, literal braces inside one.
+describe("blocks.transform attribute lines inside a fenced body", function()
+  it("rejects an unknown construct inside a {blurb} body instead of emitting braces", function()
+    local ok, err = pcall(run, "{blurb, class: tip}\n{nonsense}\n{/blurb}\n")
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("nonsense", 1, true))
+  end)
+
+  it("rejects one inside an {aside} body the same way", function()
+    local ok = pcall(run, "{aside}\n{nonsense}\n{/aside}\n")
+    assert.is_false(ok)
+  end)
+
+  it("still passes an index marker through, since inline.transform owns it", function()
+    local out = run('{blurb, class: tip}\n{ix: "B-tree"}\nB-trees are fast.\n{/blurb}\n')
+    assert.is_truthy(out:find('{ix: "B-tree"}', 1, true))
+    assert.is_truthy(out:find("::: {.tip .blurb}", 1, true))
+  end)
+
+  it("leaves an attribute-shaped line inside a nested code fence alone", function()
+    -- Fence-awareness outranks the rule above: inside a code sample the line
+    -- is not Markua at all.
+    local out = run("{blurb, class: tip}\n```json\n{\"class\": \"tip\"}\n```\n{/blurb}\n")
+    assert.is_truthy(out:find('{"class": "tip"}', 1, true))
   end)
 end)

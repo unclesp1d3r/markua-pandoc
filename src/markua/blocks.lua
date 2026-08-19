@@ -398,6 +398,28 @@ function M.transform(lines, cfg, file)
       -- escape injected into what the author wrote verbatim.
       if lines[i].in_code then
         emit(lines[i].text)
+      elseif attributes.is_attribute_line(lines[i].text) then
+        -- A body line is not exempt from the unknown-construct rule. Emitting
+        -- it verbatim let `{nonsense}` inside a blurb reach the book as
+        -- literal braces, while the identical line one level up raised --
+        -- the same input silently meaning two different things depending on
+        -- where it sat. Index markers are the one attribute line that
+        -- legitimately passes through here, because inline.transform runs
+        -- after this pass and owns them (R23).
+        --
+        -- Everything else is refused rather than interpreted: what a nested
+        -- directive or a second attribute list should MEAN inside a callout
+        -- body is undecided, and inventing a nesting semantic to avoid an
+        -- error would be a worse answer than saying so.
+        local body_parsed = attributes.parse(lines[i].text, file, lines[i].number)
+        if is_index_only(body_parsed, cfg) then
+          emit(lines[i].text)
+        else
+          errors.report(cfg, file, lines[i].number, string.format(
+            "an attribute list other than an index marker is not supported inside a {%s} body: %s",
+            marker, lines[i].text))
+          emit(lines[i].text)   -- lenient only; preserve the author's line
+        end
       else
         emit_body(lines[i].text)
       end
@@ -514,13 +536,43 @@ function M.transform(lines, cfg, file)
         reject_pending("attribute list does not precede a directive")
         local word = parsed.bare[1]
         local kind = DIRECTIVES[word]
-        -- The class and the attribute key are both the kind; the value is
-        -- the bare word verbatim, so no name is translated anywhere (R18).
-        -- Self-closing, not a wrapper (R16, R17): confirmed against the
-        -- reader's own TARGET_FORMAT that prose following the marker is a
-        -- SIBLING Para, not nested inside an empty Div (KTD3).
-        emit(string.format('::: {.%s %s="%s"}', kind, kind, word))
-        emit(":::")
+        -- A directive marker carries only its bare word (R18), so any other
+        -- attribute on the line has nowhere to go. Emitting the marker and
+        -- dropping the rest silently loses author intent -- `{pagebreak,
+        -- id: lost}` would discard an anchor another part of the book
+        -- cross-references. Report instead, so strict aborts and --lenient
+        -- keeps the author's line intact rather than a lossy marker.
+        local extras = {}
+        if parsed.id then
+          extras[#extras + 1] = "#" .. parsed.id
+        end
+        for _, c in ipairs(parsed.classes) do
+          extras[#extras + 1] = "." .. c
+        end
+        local keys = {}
+        for k in pairs(parsed.keyvals) do
+          keys[#keys + 1] = k
+        end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+          extras[#extras + 1] = k
+        end
+        if #extras > 0 then
+          errors.report(cfg, file, rec.number, string.format(
+            "the %s directive takes no other attributes, but this line carries %s",
+            word, table.concat(extras, ", ")))
+          -- Only reached under --lenient: keep the author's line rather than
+          -- a marker that dropped half of what they wrote.
+          emit(text)
+        else
+          -- The class and the attribute key are both the kind; the value is
+          -- the bare word verbatim, so no name is translated anywhere (R18).
+          -- Self-closing, not a wrapper (R16, R17): confirmed against the
+          -- reader's own TARGET_FORMAT that prose following the marker is a
+          -- SIBLING Para, not nested inside an empty Div (KTD3).
+          emit(string.format('::: {.%s %s="%s"}', kind, kind, word))
+          emit(":::")
+        end
         i = i + 1
       elseif #parsed.bare == 1 then
         -- A lone bare word that reached here is not `blurb`, not `aside`,
@@ -584,7 +636,20 @@ function M.transform(lines, cfg, file)
       if #pending_classes > 0 then
         applied_line = pending.line
         head, decoratives = callout_classes(pending_classes, cfg, file, applied_line)
-        if blurb_prefix.class and head ~= blurb_prefix.class then
+        -- Warn only when the head is a class the AUTHOR actually named. Under
+        -- --lenient an unregistered-and-unrepresentable class resolves to the
+        -- `information` fallback, and reporting that as "explicit class
+        -- 'information' overrides W>'s implied class 'warning'" names a class
+        -- the author never wrote -- a second, contradictory diagnostic on top
+        -- of the accurate one resolve_callout_class already emitted.
+        local head_is_authors = false
+        for _, c in ipairs(pending_classes) do
+          if c == head then
+            head_is_authors = true
+            break
+          end
+        end
+        if head_is_authors and blurb_prefix.class and head ~= blurb_prefix.class then
           errors.warn(file, applied_line, string.format(
             "explicit class '%s' overrides %s's implied class '%s'", head, blurb_prefix.prefix, blurb_prefix.class),
             cfg.sink)

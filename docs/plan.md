@@ -3273,6 +3273,19 @@ describe("blocks.transform blurb sugar prefixes", function()
     assert.equals(0, #sink.writes)
   end)
 
+  it("does not claim the recovery fallback was an explicit override", function()
+    -- Under --lenient an unregistered-and-unrepresentable class resolves to
+    -- `information`. Reporting that as "explicit class 'information'
+    -- overrides W>'s implied class 'warning'" names a class the author never
+    -- wrote, contradicting the accurate warning already emitted for it.
+    local sink = capturing_sink()
+    local cfg = config.merge(config.defaults(), { strict = false, sink = sink })
+    run('{class: "3bad"}\nW> hi\n', cfg)
+    local joined = table.concat(sink.writes, "\n")
+    assert.is_truthy(joined:find("3bad", 1, true))
+    assert.is_nil(joined:find("overrides", 1, true))
+  end)
+
   it("carries an {id: sidebar} pending list's id onto a sugar prefix's div, keeping its class", function()
     -- A list with no class overrides nothing: `tip` still comes from the
     -- prefix, but the id rides along.
@@ -3373,6 +3386,61 @@ describe("blocks.transform directives", function()
     -- short-circuited by this table.
     local out = run("{quiz-answers}\n")
     assert.is_truthy(out:find('::: {.insert insert="quiz-answers"}', 1, true))
+  end)
+
+  it("rejects a directive carrying attributes the marker cannot hold", function()
+    -- A marker carries only its bare word (R18), so emitting one and dropping
+    -- the rest silently discards an anchor the book may cross-reference.
+    local ok, err = pcall(run, "{pagebreak, id: lost}\n")
+    assert.is_false(ok)
+    local msg = tostring(err)
+    assert.is_truthy(msg:find("pagebreak", 1, true))
+    assert.is_truthy(msg:find("id", 1, true))
+  end)
+
+  it("names a class and a keyval on a directive line too", function()
+    local ok, err = pcall(run, "{index, class: x, title: y}\n")
+    assert.is_false(ok)
+    local msg = tostring(err)
+    assert.is_truthy(msg:find(".x", 1, true))
+    assert.is_truthy(msg:find("title", 1, true))
+  end)
+
+  it("keeps the author's directive line intact under --lenient", function()
+    local out = table.concat(blocks.transform(
+      scanner.scan("{pagebreak, id: lost}\n"), lenient_cfg(), "f.md"), "\n")
+    assert.is_truthy(out:find("{pagebreak, id: lost}", 1, true))
+    assert.is_nil(out:find("insert=", 1, true))
+  end)
+end)
+
+-- An attribute line inside a fenced {blurb}/{aside} body is subject to the
+-- same unknown-construct rule as one at the top level. Emitting it verbatim
+-- meant the identical line meant two different things depending on where it
+-- sat -- a hard error outside a callout, literal braces inside one.
+describe("blocks.transform attribute lines inside a fenced body", function()
+  it("rejects an unknown construct inside a {blurb} body instead of emitting braces", function()
+    local ok, err = pcall(run, "{blurb, class: tip}\n{nonsense}\n{/blurb}\n")
+    assert.is_false(ok)
+    assert.is_truthy(tostring(err):find("nonsense", 1, true))
+  end)
+
+  it("rejects one inside an {aside} body the same way", function()
+    local ok = pcall(run, "{aside}\n{nonsense}\n{/aside}\n")
+    assert.is_false(ok)
+  end)
+
+  it("still passes an index marker through, since inline.transform owns it", function()
+    local out = run('{blurb, class: tip}\n{ix: "B-tree"}\nB-trees are fast.\n{/blurb}\n')
+    assert.is_truthy(out:find('{ix: "B-tree"}', 1, true))
+    assert.is_truthy(out:find("::: {.tip .blurb}", 1, true))
+  end)
+
+  it("leaves an attribute-shaped line inside a nested code fence alone", function()
+    -- Fence-awareness outranks the rule above: inside a code sample the line
+    -- is not Markua at all.
+    local out = run("{blurb, class: tip}\n```json\n{\"class\": \"tip\"}\n```\n{/blurb}\n")
+    assert.is_truthy(out:find('{"class": "tip"}', 1, true))
   end)
 end)
 ```
@@ -3787,6 +3855,28 @@ function M.transform(lines, cfg, file)
       -- escape injected into what the author wrote verbatim.
       if lines[i].in_code then
         emit(lines[i].text)
+      elseif attributes.is_attribute_line(lines[i].text) then
+        -- A body line is not exempt from the unknown-construct rule. Emitting
+        -- it verbatim let `{nonsense}` inside a blurb reach the book as
+        -- literal braces, while the identical line one level up raised --
+        -- the same input silently meaning two different things depending on
+        -- where it sat. Index markers are the one attribute line that
+        -- legitimately passes through here, because inline.transform runs
+        -- after this pass and owns them (R23).
+        --
+        -- Everything else is refused rather than interpreted: what a nested
+        -- directive or a second attribute list should MEAN inside a callout
+        -- body is undecided, and inventing a nesting semantic to avoid an
+        -- error would be a worse answer than saying so.
+        local body_parsed = attributes.parse(lines[i].text, file, lines[i].number)
+        if is_index_only(body_parsed, cfg) then
+          emit(lines[i].text)
+        else
+          errors.report(cfg, file, lines[i].number, string.format(
+            "an attribute list other than an index marker is not supported inside a {%s} body: %s",
+            marker, lines[i].text))
+          emit(lines[i].text)   -- lenient only; preserve the author's line
+        end
       else
         emit_body(lines[i].text)
       end
@@ -3903,13 +3993,43 @@ function M.transform(lines, cfg, file)
         reject_pending("attribute list does not precede a directive")
         local word = parsed.bare[1]
         local kind = DIRECTIVES[word]
-        -- The class and the attribute key are both the kind; the value is
-        -- the bare word verbatim, so no name is translated anywhere (R18).
-        -- Self-closing, not a wrapper (R16, R17): confirmed against the
-        -- reader's own TARGET_FORMAT that prose following the marker is a
-        -- SIBLING Para, not nested inside an empty Div (KTD3).
-        emit(string.format('::: {.%s %s="%s"}', kind, kind, word))
-        emit(":::")
+        -- A directive marker carries only its bare word (R18), so any other
+        -- attribute on the line has nowhere to go. Emitting the marker and
+        -- dropping the rest silently loses author intent -- `{pagebreak,
+        -- id: lost}` would discard an anchor another part of the book
+        -- cross-references. Report instead, so strict aborts and --lenient
+        -- keeps the author's line intact rather than a lossy marker.
+        local extras = {}
+        if parsed.id then
+          extras[#extras + 1] = "#" .. parsed.id
+        end
+        for _, c in ipairs(parsed.classes) do
+          extras[#extras + 1] = "." .. c
+        end
+        local keys = {}
+        for k in pairs(parsed.keyvals) do
+          keys[#keys + 1] = k
+        end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+          extras[#extras + 1] = k
+        end
+        if #extras > 0 then
+          errors.report(cfg, file, rec.number, string.format(
+            "the %s directive takes no other attributes, but this line carries %s",
+            word, table.concat(extras, ", ")))
+          -- Only reached under --lenient: keep the author's line rather than
+          -- a marker that dropped half of what they wrote.
+          emit(text)
+        else
+          -- The class and the attribute key are both the kind; the value is
+          -- the bare word verbatim, so no name is translated anywhere (R18).
+          -- Self-closing, not a wrapper (R16, R17): confirmed against the
+          -- reader's own TARGET_FORMAT that prose following the marker is a
+          -- SIBLING Para, not nested inside an empty Div (KTD3).
+          emit(string.format('::: {.%s %s="%s"}', kind, kind, word))
+          emit(":::")
+        end
         i = i + 1
       elseif #parsed.bare == 1 then
         -- A lone bare word that reached here is not `blurb`, not `aside`,
@@ -3973,7 +4093,20 @@ function M.transform(lines, cfg, file)
       if #pending_classes > 0 then
         applied_line = pending.line
         head, decoratives = callout_classes(pending_classes, cfg, file, applied_line)
-        if blurb_prefix.class and head ~= blurb_prefix.class then
+        -- Warn only when the head is a class the AUTHOR actually named. Under
+        -- --lenient an unregistered-and-unrepresentable class resolves to the
+        -- `information` fallback, and reporting that as "explicit class
+        -- 'information' overrides W>'s implied class 'warning'" names a class
+        -- the author never wrote -- a second, contradictory diagnostic on top
+        -- of the accurate one resolve_callout_class already emitted.
+        local head_is_authors = false
+        for _, c in ipairs(pending_classes) do
+          if c == head then
+            head_is_authors = true
+            break
+          end
+        end
+        if head_is_authors and blurb_prefix.class and head ~= blurb_prefix.class then
           errors.warn(file, applied_line, string.format(
             "explicit class '%s' overrides %s's implied class '%s'", head, blurb_prefix.prefix, blurb_prefix.class),
             cfg.sink)
@@ -4035,7 +4168,7 @@ return M
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/blocks_spec.lua`
-Expected: PASS, 90 successes
+Expected: PASS, 98 successes
 
 - [ ] **Step 5: Commit**
 
@@ -4591,7 +4724,7 @@ In the attribute-line branch, before the `DIRECTIVES` lookup, add:
 - [ ] **Step 4: Run the tests and make sure they pass**
 
 Run: `busted test/blocks_spec.lua`
-Expected: PASS, 93 successes
+Expected: PASS, 101 successes
 
 - [ ] **Step 5: Commit**
 
